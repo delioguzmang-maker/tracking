@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soccercal"
+version = "0.3.0"
+description = "Broadcast soccer video -> SkillCorner-style tracking data (calibration, tracking, re-identification)"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.23",
+    "scipy>=1.9",
+    "pandas>=1.5",
+    "opencv-python>=4.7",
+    "torch>=2.0",
+    "torchvision>=0.15",
+    "ultralytics>=8.1",
+    "tqdm",
+    "certifi",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+kloppy = ["kloppy>=3.15"]
+notebooks = ["jupyterlab", "ipykernel", "kloppy>=3.15"]
+dev = ["pytest", "kloppy>=3.15", "nbformat"]
+
+[project.scripts]
+soccercal = "soccercal.cli:main"
+
+[tool.setuptools]
+packages = ["soccercal"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.ipynb_checkpoints/
+.pytest_cache/
+salida*/
+*.pt
+*.mp4
+*.pkl.gz
+!docs/*.mp4
