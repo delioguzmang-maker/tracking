@@ -132,7 +132,9 @@ soccercal track ~/Downloads/partido.mp4 -o salida_partido --max-seconds 60 --hom
 open salida_partido/verificacion.mp4
 ```
 
-Si se ve bien, el partido entero (el doble de rápido con `--stride 2`, la salida sigue a 10 fps):
+Si se ve bien, el partido entero (el doble de rápido con `--stride 2`, la salida sigue a 10 fps). Los
+vídeos de 50/60 fps ya se analizan uno de cada dos fotogramas automáticamente; los fps se miden con las
+marcas de tiempo reales del archivo, no con la cabecera, que a veces miente en clips recortados:
 
 ```bash
 soccercal track ~/Downloads/partido.mp4 -o salida_partido --stride 2 --redo

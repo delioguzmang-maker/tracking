@@ -119,3 +119,19 @@ def test_ball_trajectory_ignores_false_positives():
     err = np.linalg.norm(pos[ok] - truth[ok], axis=1)
     assert ok.mean() > 0.8  # detected or interpolated most of the time
     assert np.median(err) < 0.3 and (err > 3).mean() < 0.05  # and it is the real ball
+
+
+def test_real_fps_from_timestamps(tmp_path):
+    import cv2
+
+    from soccercal.analysis import auto_stride, iter_frames, probe_fps
+
+    path = str(tmp_path / "clip.avi")
+    vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"MJPG"), 50.0, (64, 48))
+    for k in range(30):
+        vw.write(np.full((48, 64, 3), k * 8, np.uint8))
+    vw.release()
+    fps = probe_fps(path)
+    assert abs(fps - 50.0) < 0.5 and auto_stride(fps) == 2
+    t = [s for _, s, _ in iter_frames(path, 0.0, 2, None, with_time=True, fps=fps)]
+    assert len(t) == 15 and np.allclose(np.diff(t), 0.04, atol=1e-3)

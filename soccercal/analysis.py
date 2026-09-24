@@ -100,13 +100,34 @@ def auto_stride(fps: float, target: float = 25.0) -> int:
     return max(1, int(round(fps / target)))
 
 
-def iter_frames(path: str, start_s: float, stride: int, max_frames: int | None, with_time: bool = False):
+def probe_fps(path: str | Path, n: int = 90) -> float:
+    """Real frame rate from the timestamps of the first frames. The header can lie (trimmed or
+    re-muxed files, screen recordings: a 59.94 fps clip announced as 52.2 fps)."""
+    cap = cv2.VideoCapture(str(path))
+    header = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    ts = []
+    for _ in range(n):
+        if not cap.grab():
+            break
+        ts.append(cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0)
+    cap.release()
+    dt = np.diff(ts)
+    dt = dt[np.isfinite(dt) & (dt > 0)]
+    if len(dt) >= 5:
+        fps = 1.0 / float(np.median(dt))
+        if 5.0 <= fps <= 240.0:
+            return fps
+    return header
+
+
+def iter_frames(path: str, start_s: float, stride: int, max_frames: int | None, with_time: bool = False,
+                fps: float | None = None):
     """Yields (frame index, frame) — or (index, seconds, frame) with ``with_time``. The time is
     the container timestamp, correct for variable-frame-rate files (phone / screen recordings)."""
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise FileNotFoundError(f"No se puede abrir el vídeo: {path}")
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    fps = fps or cap.get(cv2.CAP_PROP_FPS) or 25.0
     start = int(round(start_s * fps))
     if start > 0:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start)
@@ -136,10 +157,11 @@ def analyze(video: str | Path, cfg: Config | None = None, progress: bool = True,
     cap = cv2.VideoCapture(str(video))
     if not cap.isOpened():
         raise FileNotFoundError(f"No se puede abrir el vídeo: {video}")
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    header_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
+    fps = probe_fps(video)  # n_total (header) is only used for the progress bar
     stride = cfg.stride or auto_stride(fps)
     max_frames = None
     if cfg.max_seconds is not None:
@@ -153,6 +175,7 @@ def analyze(video: str | Path, cfg: Config | None = None, progress: bool = True,
     reg = Registrar(W, H)
     out = Analysis(str(video), fps, W, H, n_total, cfg.to_dict())
     out.config["stride_used"] = stride
+    out.config["header_fps"] = header_fps
     out.config["jersey_ocr_available"] = bool(jersey and jersey.available)
 
     bar = None
@@ -199,7 +222,7 @@ def analyze(video: str | Path, cfg: Config | None = None, progress: bool = True,
         if bar is not None:
             bar.update(len(recs))
 
-    for idx, t, fr in iter_frames(video, cfg.start_s, stride, max_frames, with_time=True):
+    for idx, t, fr in iter_frames(video, cfg.start_s, stride, max_frames, with_time=True, fps=fps):
         buf.append((idx, t, fr))
         if len(buf) >= cfg.batch:
             flush(buf)

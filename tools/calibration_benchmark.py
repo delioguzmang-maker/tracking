@@ -88,7 +88,7 @@ def main():
     else:
         an = analyze(video, cfg1)
         an.save(args.cache)
-    frames = [fr for _, fr in iter_frames(video, 0.0, 1, len(an.frames))]
+    frames = [fr for _, fr in iter_frames(video, 0.0, 1, len(an.frames), fps=an.fps)]
     wm = [white_mask(f) for f in frames]
     n = len(frames)
     rows = {}

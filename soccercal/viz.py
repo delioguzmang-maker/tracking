@@ -147,7 +147,7 @@ def render_video(res, path: str | Path, progress: bool = True, max_frames: int |
         except ImportError:
             pass
     n = 0
-    for idx, fr in iter_frames(an.video, an.config.get("start_s", 0.0), stride, len(an.frames)):
+    for idx, fr in iter_frames(an.video, an.config.get("start_s", 0.0), stride, len(an.frames), fps=an.fps):
         i = by_index.get(idx)
         if i is None:
             continue
