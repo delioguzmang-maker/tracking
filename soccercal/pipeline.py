@@ -53,7 +53,7 @@ class Result:
             "frames_analysed": n,
             "frames_with_camera": valid,
             "pct_frames_with_camera": round(100.0 * valid / max(n, 1), 1),
-            "segments": len(self.segments),
+            "camera_shots_used": sum(any(self.cameras[i] is not None for i in range(s.start, s.end)) for s in self.segments),
             "median_line_alignment": round(float(np.median(aligns)), 3) if aligns else None,
             "identities_team_A": per_team[0],
             "identities_team_B": per_team[1],

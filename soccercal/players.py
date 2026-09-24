@@ -76,6 +76,8 @@ class Identity:
     color_bgr: tuple = (128, 128, 128)
     number: int | None = None  # shirt number read by OCR (None = unknown)
     number_votes: int = 0
+    kit_group: int | None = None  # colour group most of the detections are nearest to
+    absorbed: list = field(default_factory=list)  # duplicate fragments: drawn with this id, not in the data
     # trajectory on the analysed-frame grid
     frames: np.ndarray = field(default_factory=lambda: np.zeros(0, int))
     pos: np.ndarray = field(default_factory=lambda: np.zeros((0, 2)))
@@ -168,14 +170,17 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
     idents = []
     for k, ch in enumerate(chains, start=1):
         number, votes = vote_number([r for t in ch for r in t.jersey_reads])
-        team, conf = OTHER, 0.0
+        team, conf, group = OTHER, 0.0, None
         if tm is not None:
             D = [meas[f].desc[d] for t in ch for f, d in zip(t.frames, t.det_idx) if np.isfinite(meas[f].desc[d][0])]
             if D:
-                team, conf = decide(tm.distances(np.array(D)), has_number=number is not None)
-        ident = Identity(k, team, "player" if team != OTHER else "referee", ch, number=number, number_votes=votes)
+                dist = tm.distances(np.array(D))
+                team, conf = decide(dist, has_number=number is not None)
+                group = int(np.bincount(np.argmin(dist, 1)).argmax())
+        ident = Identity(k, team, "player" if team != OTHER else "referee", ch, number=number, number_votes=votes,
+                         kit_group=group)
         z = np.concatenate([t.z for t in ch])
-        if outside_share(z, cfg) >= cfg.staff_outside_share:
+        if off_pitch(z, cfg):
             # lives outside the lines: coach, assistant referee, substitute, ball boy -> not a player
             ident.team, ident.role = OTHER, "staff"
         idents.append(ident)
@@ -199,6 +204,10 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
         for t in ident.tracklets:
             for f, d in zip(t.frames, t.det_idx):
                 assignments[f][int(meas[f].det_idx[d])] = ident.pid
+    for ident in idents:
+        for t in ident.absorbed:
+            for f, d in zip(t.frames, t.det_idx):
+                assignments[f].setdefault(int(meas[f].det_idx[d]), ident.pid)
     # identities may have changed team (goalkeepers): recompute the team motion on final teams
     for ident in idents:
         for t in ident.tracklets:
@@ -215,18 +224,46 @@ def outside_share(z: np.ndarray, cfg: Config, tol: float = 0.75) -> float:
     return float(out.mean())
 
 
+def off_pitch(z: np.ndarray, cfg: Config) -> bool:
+    """Someone who lives outside the lines: often outside, or typically more than 0.5 m out (a
+    coach at the edge of the technical area is ~1 m out; calibration noise puts him on the line
+    half of the time)."""
+    if len(z) == 0:
+        return False
+    beyond = np.maximum(np.abs(z[:, 0]) - cfg.pitch_length / 2, np.abs(z[:, 1]) - cfg.pitch_width / 2)
+    return outside_share(z, cfg) >= cfg.staff_outside_share or float(np.median(beyond)) > 0.5
+
+
 def mark_assistant_referees(idents: list[Identity], cfg: Config) -> None:
-    """A referee-coloured person who lives on a touchline is an assistant referee."""
+    """Assistant referees live on a touchline and wear the referee's kit. Anyone else on the
+    touchline with a kit of neither team (coach in a black jacket, fourth official,
+    substitutes) is staff. Without a referee to compare with, an odd kit on the line is an
+    assistant referee."""
+    W2 = cfg.pitch_width / 2
+
+    def med_y(i):
+        return float(np.median(np.abs(np.concatenate([t.z for t in i.tracklets])[:, 1])))
+
+    def size(i):
+        return sum(len(t.frames) for t in i.tracklets)
+
+    refs = [i for i in idents if i.role == "referee" and med_y(i) <= W2 - 1.5]
+    ref_group = max(refs, key=size).kit_group if refs else None
     for ident in idents:
+        if ident.team != OTHER or ident.role not in ("referee", "staff") or not W2 - 1.5 < med_y(ident) < W2 + 3:
+            continue
+        same_kit = ident.kit_group == ref_group
         if ident.role == "referee":
-            z = np.concatenate([t.z for t in ident.tracklets])
-            if np.median(np.abs(z[:, 1])) > cfg.pitch_width / 2 - 1.5:
-                ident.role = "assistant_referee"
+            ident.role = "assistant_referee" if ref_group is None or same_kit else "staff"
+        elif ref_group is not None and same_kit:
+            ident.role = "assistant_referee"  # runs just outside the line: staff by position, not by kit
 
 
-def merge_unique_roles(idents: list[Identity]) -> list[Identity]:
+def merge_unique_roles(idents: list[Identity], dup_dist: float = 2.0) -> list[Identity]:
     """There is one referee on the pitch and one goalkeeper per team: their fragments that
-    never appear at the same time are the same person."""
+    never appear at the same time are the same person. A fragment seen *at the same time*
+    as the main one and at the same place is a duplicate (a second, partial box of an
+    occluded referee): it is absorbed (drawn with the same label, no data of its own)."""
     drop = set()
     for key in [("referee", OTHER), ("goalkeeper", 0), ("goalkeeper", 1)]:
         grp = sorted([i for i in idents if i.role == key[0] and (key[0] == "referee" or i.team == key[1])],
@@ -238,11 +275,29 @@ def merge_unique_roles(idents: list[Identity]) -> list[Identity]:
         for other in grp[1:]:
             fr = set(int(f) for t in other.tracklets for f in t.frames)
             if fr & used:
+                if _median_gap(host, other) < dup_dist:
+                    host.absorbed += other.tracklets + other.absorbed
+                    drop.add(other.pid)
                 continue
             host.tracklets = sorted(host.tracklets + other.tracklets, key=lambda t: t.start)
             used |= fr
             drop.add(other.pid)
     return [i for i in idents if i.pid not in drop]
+
+
+def _median_gap(host: Identity, other: Identity) -> float:
+    """Median distance between ``other``'s observations and ``host``'s (interpolated) path."""
+    hf = np.concatenate([t.frames for t in host.tracklets]).astype(float)
+    hz = np.concatenate([t.z for t in host.tracklets])
+    o = np.argsort(hf)
+    hf, hz = hf[o], hz[o]
+    of = np.concatenate([t.frames for t in other.tracklets]).astype(float)
+    oz = np.concatenate([t.z for t in other.tracklets])
+    inside = (of >= hf[0]) & (of <= hf[-1])
+    if not inside.any():
+        return np.inf
+    p = np.stack([np.interp(of[inside], hf, hz[:, 0]), np.interp(of[inside], hf, hz[:, 1])], 1)
+    return float(np.median(np.linalg.norm(oz[inside] - p, axis=1)))
 
 
 def merge_by_number(idents: list[Identity]) -> list[Identity]:
@@ -292,7 +347,7 @@ def kit_display_colors(raw: list) -> list:
             v2 = 45 if v < 110 else 235
             out.append((v2, v2, v2))
         else:
-            b, g, r = cv2.cvtColor(np.uint8([[[h, max(s, 200), max(v, 210)]]]), cv2.COLOR_HSV2BGR)[0, 0]
+            b, g, r = cv2.cvtColor(np.uint8([[[_kit_hue(h), 220, 235]]]), cv2.COLOR_HSV2BGR)[0, 0]
             out.append((int(b), int(g), int(r)))
     fallback = [(40, 40, 230), (230, 120, 20)]
     for k in (0, 1):
@@ -302,6 +357,15 @@ def kit_display_colors(raw: list) -> list:
     if np.linalg.norm(a - b) < 90:
         out = fallback
     return [tuple(int(x) for x in c) for c in out]
+
+
+def _kit_hue(h: int) -> int:
+    """Snap an OpenCV hue (0-179) to a canonical kit colour. Skin, stadium light and shade pull
+    a red shirt towards orange (measured hue ~14 for Bayern's red at night)."""
+    for top, canon in ((17, 0), (25, 15), (40, 28), (85, 60), (105, 100), (135, 118), (165, 150)):
+        if h < top:
+            return canon
+    return 0
 
 
 def defending_sides(idents: list[Identity]) -> dict:

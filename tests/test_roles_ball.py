@@ -9,7 +9,7 @@ from soccercal.config import Config
 from soccercal.detect import BALL, PERSON, Detections
 from soccercal.jersey import vote_number
 from soccercal.players import (Identity, kit_display_colors, mark_assistant_referees, merge_by_number,
-                               merge_unique_roles, outside_share)
+                               merge_unique_roles, off_pitch, outside_share)
 from soccercal.stitch import Tracklet
 
 from conftest import look_at
@@ -51,6 +51,36 @@ def test_assistant_referee_vs_referee():
     assert ref.role == "referee" and lines.role == "assistant_referee"
 
 
+def test_coach_on_touchline_is_not_assistant_referee():
+    """Colour group 2 = referee kit, 3 = coach's black jacket. A coach standing at the edge
+    of the technical area is staff even if calibration noise puts him on the line."""
+    def ident(pid, y, group, role="referee", x0=-20.0):
+        tl = Tracklet(pid, np.arange(20), np.c_[np.linspace(x0, x0 + 20, 20), np.full(20, y)], np.zeros((20, 2, 2)),
+                      np.ones(20), np.zeros(20, int))
+        return Identity(pid, -1, role, [tl], kit_group=group)
+    ref, lines, coach = ident(1, 3.0, 2), ident(2, -34.3, 2), ident(3, -34.4, 3)
+    runner = ident(4, -35.6, 2, role="staff")  # assistant referee running just outside the line
+    mark_assistant_referees([ref, lines, coach, runner], Config())
+    assert ref.role == "referee" and lines.role == "assistant_referee"
+    assert coach.role == "staff" and runner.role == "assistant_referee"
+    rng = np.random.default_rng(1)
+    at_edge = np.c_[rng.uniform(-5, 5, 60), -34.7 + rng.normal(0, 0.3, 60)]  # 0.7 m out, noisy
+    assert outside_share(at_edge, Config()) < 0.6 and off_pitch(at_edge, Config())
+    assert not off_pitch(np.c_[np.linspace(-30, 0, 50), np.full(50, -33.5)], Config())
+
+
+def test_duplicate_referee_box_is_absorbed():
+    def tl(tid, fr, y):
+        fr = np.asarray(fr)
+        return Tracklet(tid, fr, np.c_[fr * 0.1, np.full(len(fr), y)], np.zeros((len(fr), 2, 2)), np.ones(len(fr)),
+                        np.zeros(len(fr), int))
+    main = Identity(1, -1, "referee", [tl(1, range(0, 100), 0.0)])
+    dup = Identity(2, -1, "referee", [tl(2, range(40, 55), 0.8)])  # partial box of the same man
+    other = Identity(3, -1, "referee", [tl(3, range(40, 55), 12.0)])  # someone else (a misread player)
+    out = merge_unique_roles([main, dup, other])
+    assert {i.pid for i in out} == {1, 3} and len(out[0].absorbed) == 1 and len(out[0].tracklets) == 1
+
+
 def test_vote_number_needs_agreement():
     assert vote_number([(17, 0.9), (17, 0.8), (12, 0.7)]) == (17, 2)
     assert vote_number([(17, 0.9)])[0] is None  # a single reading is not enough
@@ -77,7 +107,8 @@ def test_merge_by_number():
 def test_referee_fragments_merge():
     a = Identity(1, -1, "referee", [_tl(1, 0, 50)])
     b = Identity(2, -1, "referee", [_tl(2, 60, 90)])
-    c = Identity(3, -1, "referee", [_tl(3, 40, 70)])  # overlaps both: a different person
+    c = Identity(3, -1, "referee", [_tl(3, 40, 70)])  # overlaps both, 10 m away: a different person
+    c.tracklets[0].z[:] = 10.0
     out = merge_unique_roles([a, b, c])
     assert {i.pid for i in out} == {1, 3} and len(out[0].tracklets) == 2
 
@@ -85,6 +116,8 @@ def test_referee_fragments_merge():
 def test_kit_colours_are_distinct():
     red, dark = kit_display_colors([np.array([60, 60, 170]), np.array([40, 35, 30])])
     assert red[2] > 180 and max(dark) < 80  # saturated red vs near-black
+    red_at_night, _ = kit_display_colors([np.array([53, 95, 143]), np.array([46, 73, 78])])  # measured: hue 14
+    assert red_at_night[2] > 200 and red_at_night[1] < 40  # drawn red, not orange
     same = kit_display_colors([np.array([60, 60, 170]), np.array([65, 55, 175])])
     assert np.linalg.norm(np.subtract(same[0], same[1])) > 90  # falls back to distinguishable colours
 

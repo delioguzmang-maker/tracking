@@ -50,7 +50,9 @@ derecha vista desde la cámara principal), `y` a lo ancho (positivo hacia la ban
 Reglas (como SkillCorner): solo se usan planos abiertos de la cámara principal; un plano con una persona
 que ocupa más del 40 % de la altura de la imagen, o con poco césped, se descarta. Una persona que pasa la
 mayor parte del tiempo fuera de las líneas (banda, banquillo) es *staff*, nunca jugador, y el seguimiento
-no puede unirla con un jugador.
+no puede unirla con un jugador. Un juez de línea es quien vive en la banda **y viste como el árbitro**;
+alguien en la banda con otra ropa (entrenador con chaqueta negra, cuarto árbitro con abrigo, suplentes
+calentando) es *staff* y no se dibuja.
 
 ![vídeo de verificación](docs/verificacion_ejemplo.jpg)
 
@@ -267,14 +269,25 @@ El mismo banco sirvió para corregir el diseño: la primera versión (enlace vor
 movimiento del equipo) asignaba mal el 6 % de las observaciones; la actual, el 0,3 %. La
 extrapolación siguiendo al equipo bajó el error fuera de cámara de 6,1 m a 3,8 m.
 
-**Balón** (clip de 1080p, 153 fotogramas): se conoce su posición en el **77 %** de los fotogramas de
-salida (33 % detectado directamente; el resto interpolado entre detecciones o en los pies del jugador
-que lo lleva). En una muestra de 17 posiciones elegidas, las 17 eran el balón real. Antes de los filtros
-nuevos, en un clip del Bayern–PSG el "balón" elegido era casi siempre la bota flúor de un jugador.
+**Balón**, en los fotogramas de salida (10 fps) con cámara válida:
 
-**Personas que no son jugadores** (clip Bayern–PSG de 15 s): el plano del público del inicio se
-descarta entero; juez de línea, entrenador y árbitro quedan fuera de los datos de jugadores; dorsales
-leídos: #17 (20 lecturas) y #27 del Bayern.
+| clip | posición conocida | detectado directamente | muestra revisada a ojo |
+|---|---|---|---|
+| clip de 1080p, 6 s | **77 %** | 49 % | 48 de 48 posiciones eran el balón real |
+| Bayern–PSG original, 720p, 14 s | **70 %** | 41 % | 48 de 48 posiciones eran el balón real |
+
+El resto está interpolado entre detecciones o en los pies del jugador que lo lleva. Antes de los filtros,
+en el Bayern–PSG el "balón" elegido era casi siempre la bota flúor de un jugador.
+
+**Bayern–PSG original** (vídeo de la semifinal, 720p, 59,94 fps aunque la cabecera del archivo dice
+52,2: los fps se miden con las marcas de tiempo reales):
+
+* El plano del palco del inicio (6,6 % de los fotogramas) se descarta entero.
+* Los dos entrenadores de negro junto a la banda son *staff*: no se dibujan ni salen en los datos.
+* El árbitro sale una sola vez, aunque tapado por jugadores lo detectan dos cajas.
+* El portero del PSG se asigna al PSG.
+* Dorsales leídos: #17 y #27 del Bayern y #25 del PSG.
+* La calibración cae sobre las líneas reales en todo el clip (círculo central, área, portería).
 
 Formato verificado: `tests/test_export.py` carga la salida con kloppy, y el visor oficial
 `SkillCorner_Tracking_Viewer.html` la abre sin errores (probado en Chromium: 26 identidades, 61 fotogramas, 10 Hz, portero y posesión).
@@ -291,7 +304,7 @@ Diferente / pendiente:
 
 * **Identidades y dorsales.** SkillCorner conoce la alineación, reconoce dorsales y revisa a mano
   (anuncian ~97 % de identidades correctas). Aquí los dorsales se leen con OCR cuando la espalda del
-  jugador es visible y está cerca de la cámara (en el clip de prueba a 720p: 2 de ~20 jugadores en 15 s;
+  jugador es visible y está cerca de la cámara (en el clip de prueba a 720p: 3 de 22 jugadores en 14 s;
   en un partido completo y a 1080p se leen muchos más). Un jugador sin dorsal leído que sale mucho rato
   de plano puede volver con otro `id`: habrá más identidades que jugadores. Con dorsal, los fragmentos se
   unen automáticamente.
@@ -299,7 +312,9 @@ Diferente / pendiente:
   flúor, cabezas y letras de las vallas. Por eso: se guardan también las detecciones débiles, se exige
   que el candidato esté en el césped, tenga el tamaño de un balón de 22 cm a esa distancia, no esté
   sobre un jugador y no sea de un color saturado, y se elige la trayectoria que se mueve como un balón
-  (las botas y los falsos positivos saltan). Cuando el balón no se ve pero un jugador lo tiene, se sitúa
+  (las botas y los falsos positivos saltan). Un candidato pegado al pie puede ser el balón conducido o
+  una bota blanca: solo sirve para unir dos detecciones limpias de la misma trayectoria (una
+  conducción), nunca para empezarla. Cuando el balón no se ve pero un jugador lo tiene, se sitúa
   en sus pies (`is_detected: false`). La altura (`z`) no se estima. **Para mejorarlo de verdad** usa un
   detector entrenado en fútbol: `--model ruta/a/modelo_futbol.pt` (cualquier modelo Ultralytics cuyas
   clases se llamen `player`, `goalkeeper`, `referee`, `ball`; se reconocen automáticamente).

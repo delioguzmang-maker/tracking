@@ -5,14 +5,17 @@ white boots, heads and advertising letters often score higher. So:
 
 1. keep every weak "sports ball" candidate (``Config.ball_conf``);
 2. geometric filters that only a calibrated camera allows: the candidate must be
-   on the pitch, its size must match a 22 cm ball at that distance, and it must not
-   sit on a player's head or shirt (boots are allowed but down-weighted: dribbling);
+   on the pitch, its size must match a 22 cm ball at that distance, it must not sit
+   on a player's head or shirt, and it must not be strongly coloured (neon boots);
 3. candidates are chained into constant-velocity tracklets (a real ball moves
    smoothly; false positives jump around), and the non-overlapping set of tracklets
    with the most evidence is chosen, each paying a price for starting, so isolated
    false positives are ignored and weak true detections are kept when they continue
    a trajectory;
-4. short gaps are interpolated (``is_detected`` stays False there).
+4. a candidate at a player's feet is either the ball being dribbled or a white boot.
+   It may only *bridge* two clean detections of the same tracklet (a dribble), never
+   start or end one, so boots cannot create a trajectory of their own;
+5. short gaps are interpolated (``is_detected`` stays False there).
 
 The ground projection is exact only for a ball on the grass; aerial balls give
 far-away positions that the speed limit mostly rejects (their height is not
@@ -31,10 +34,11 @@ _SPOTS = np.array([[0.0, 0.0], [-41.5, 0.0], [41.5, 0.0]])
 
 
 def candidates(fd, cam, ball_conf: float = 0.03):
-    """Filtered ball candidates of one frame: (xy (k,2), weight-adjusted log score (k,), uv (k,2))."""
+    """Filtered ball candidates of one frame: (xy (k,2), weight-adjusted log score (k,), uv (k,2),
+    at_feet (k,) bool)."""
     b = fd.det.balls()
     if cam is None or len(b) == 0:
-        return np.zeros((0, 2)), np.zeros(0), np.zeros((0, 2))
+        return np.zeros((0, 2)), np.zeros(0), np.zeros((0, 2)), np.zeros(0, bool)
     boxes, sc = b.boxes.astype(float), b.scores.astype(float)
     ctr = np.stack([(boxes[:, 0] + boxes[:, 2]) / 2, (boxes[:, 1] + boxes[:, 3]) / 2], 1)
     xy, ok = cam.image_to_plane(ctr, BALL_R)
@@ -45,31 +49,33 @@ def candidates(fd, cam, ball_conf: float = 0.03):
     ratio = size / exp
     ok &= (ratio > 0.35) & (ratio < 4.0)  # an aerial ball looks bigger than a ball on the grass there
     w = np.ones(len(sc))
-    # Anything on a player (head, shirt, and above all white / neon boots) is rejected. A ball
-    # at a player's feet is lost here, but then that player has it: the export puts the ball
-    # at his position (possession), which is where it is.
+    # Anything on a player's head or shirt is rejected. At the feet it is the dribbled ball
+    # or a boot: kept, flagged, and only used to bridge clean detections (see track_ball).
     p = fd.det.persons()
+    at_feet = np.zeros(len(sc), bool)
     for pb in p.boxes:
         bw, h = pb[2] - pb[0], pb[3] - pb[1]
         body = (ctr[:, 0] > pb[0]) & (ctr[:, 0] < pb[2]) & (ctr[:, 1] > pb[1]) & (ctr[:, 1] < pb[1] + 0.7 * h)
         # boots stick out of the box when running: widen the feet zone
         feet = (ctr[:, 0] > pb[0] - 0.15 * bw) & (ctr[:, 0] < pb[2] + 0.15 * bw) & \
                (ctr[:, 1] >= pb[1] + 0.7 * h) & (ctr[:, 1] < pb[3] + 0.06 * h)
-        ok &= ~(body | feet)
+        ok &= ~body
+        at_feet |= feet
     sv = getattr(fd, "ball_sv", None)
     if sv is not None and len(sv) == len(sc):
         ok &= sv[:, 0] <= 110  # a ball is (mostly) white: very saturated blobs are boots, logos, bibs
     if ok.any():
         d = np.min(np.linalg.norm(np.nan_to_num(xy, nan=1e6)[:, None] - _SPOTS[None], axis=2), 1)
         w[d < 0.5] *= 0.5  # painted spots look like a ball
+    w[at_feet] *= 0.5
     e = w * np.log(np.maximum(sc, 1e-4) / 0.06)
-    return xy[ok], e[ok], ctr[ok]
+    return xy[ok], e[ok], ctr[ok], at_feet[ok]
 
 
 def _ball_tracklets(C, t, fps, vmax, max_miss_s):
     """Constant-velocity tracklets through the candidates (greedy association to the prediction)."""
     tracks, active = [], []
-    for i, (xy, e, _) in enumerate(C):
+    for i, (xy, e, _, feet) in enumerate(C):
         used = np.zeros(len(e), bool)
         # extend active tracks, best-predicted first
         for tr in sorted(active, key=lambda tr: -tr["score"]):
@@ -91,6 +97,8 @@ def _ball_tracklets(C, t, fps, vmax, max_miss_s):
                     tr["v_known"] = True
                     tr["frames"].append(i)
                     tr["pos"].append(xy[k])
+                    tr["e"].append(e[k])
+                    tr["feet"].append(bool(feet[k]))
                     tr["score"] += e[k]
         # retire tracks not seen for too long
         still = []
@@ -101,8 +109,20 @@ def _ball_tracklets(C, t, fps, vmax, max_miss_s):
                 still.append(tr)
         active = still
         for k in np.nonzero(~used)[0]:
-            active.append({"frames": [i], "pos": [xy[k]], "v": np.zeros(2), "v_known": False, "score": float(e[k])})
-    return tracks + active
+            active.append({"frames": [i], "pos": [xy[k]], "e": [e[k]], "feet": [bool(feet[k])], "v": np.zeros(2),
+                           "v_known": False, "score": float(e[k])})
+    return [_trim(tr) for tr in tracks + active]
+
+
+def _trim(tr: dict) -> dict | None:
+    """Cut a tracklet to its first..last clean (not at-feet) detection; None if it has none."""
+    clean = np.nonzero(~np.array(tr["feet"]))[0]
+    if len(clean) == 0:
+        return None
+    a, b = clean[0], clean[-1] + 1
+    out = {k: tr[k][a:b] for k in ("frames", "pos", "e", "feet")}
+    out["score"] = float(np.sum(out["e"]))
+    return out
 
 
 def track_ball(an: Analysis, cams: list, ball_conf: float = 0.03, vmax: float = 40.0, max_miss_s: float = 0.4,
@@ -119,7 +139,7 @@ def track_ball(an: Analysis, cams: list, ball_conf: float = 0.03, vmax: float = 
     t = np.array([fd.t for fd in an.frames])
     C = [candidates(fd, c, ball_conf) for fd, c in zip(an.frames, cams)]
     trs = [tr for tr in _ball_tracklets(C, t, fps, vmax, max_miss_s)
-           if tr["score"] - restart_cost > 0 and len(tr["frames"]) >= 2]
+           if tr is not None and tr["score"] - restart_cost > 0 and len(tr["frames"]) >= 2]
     trs.sort(key=lambda tr: tr["frames"][-1])
     ends = [tr["frames"][-1] for tr in trs]
     best = np.zeros(len(trs) + 1)
