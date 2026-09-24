@@ -9,6 +9,8 @@ viewing direction for far players), so we track there:
 * measurement covariance propagated from pixel noise through the camera Jacobian;
 * ByteTrack-style two-stage association (confident, then weak detections),
   Mahalanobis gating + jersey-colour term, Hungarian assignment;
+* a track that has shown one team's kit never takes a detection that clearly wears the
+  other team's kit (two players crossing must not swap identities);
 * Rauch-Tung-Striebel smoothing afterwards (offline) for positions and velocities.
 """
 from __future__ import annotations
@@ -48,6 +50,15 @@ class Track:
     # per processed frame: (frame, z (2,), R (2,2), det_index or -1, score)
     obs: list = field(default_factory=list)
     last_frame: int = 0
+    team_votes: np.ndarray = field(default_factory=lambda: np.zeros(2))
+
+    @property
+    def team(self) -> int:
+        """0 / 1 once the kit is clear (>= 3 votes, 80 % agreement), else -1."""
+        n = self.team_votes.sum()
+        if n >= 3 and self.team_votes.max() >= 0.8 * n:
+            return int(np.argmax(self.team_votes))
+        return -1
 
     def predict(self, F, Q):
         self.x = F @ self.x
@@ -72,7 +83,8 @@ class PitchTracker:
         self._next = 1
 
     # --------------------------------------------------------------------- core
-    def _cost(self, tracks: list[Track], z: np.ndarray, R: np.ndarray, desc: np.ndarray | None, gate: float):
+    def _cost(self, tracks: list[Track], z: np.ndarray, R: np.ndarray, desc: np.ndarray | None, gate: float,
+              labels: np.ndarray | None = None):
         n, m = len(tracks), len(z)
         C = np.full((n, m), np.inf)
         for i, t in enumerate(tracks):
@@ -81,6 +93,8 @@ class PitchTracker:
             Si = np.linalg.inv(S)
             md = np.einsum("mi,mij,mj->m", d, Si, d)
             ok = md <= gate
+            if labels is not None and t.team >= 0:
+                ok &= ~((labels >= 0) & (labels != t.team))  # other team's kit: never the same player
             c = md / gate
             if desc is not None and t.app is not None:
                 has = np.isfinite(desc[:, 0])
@@ -90,10 +104,10 @@ class PitchTracker:
             C[i, ok] = c[ok]
         return C
 
-    def _match(self, tracks, z, R, desc, gate):
+    def _match(self, tracks, z, R, desc, gate, labels=None):
         if not tracks or not len(z):
             return [], list(range(len(tracks))), list(range(len(z)))
-        C = self._cost(tracks, z, R, desc, gate)
+        C = self._cost(tracks, z, R, desc, gate, labels)
         big = 1e6
         Cf = np.where(np.isfinite(C), C, big)
         r, c = linear_sum_assignment(Cf)
@@ -102,7 +116,7 @@ class PitchTracker:
         md = {j for _, j in pairs}
         return pairs, [i for i in range(len(tracks)) if i not in mt], [j for j in range(len(z)) if j not in md]
 
-    def _update(self, t: Track, frame: int, z, R, score, di, desc):
+    def _update(self, t: Track, frame: int, z, R, score, di, desc, label: int = -1):
         S = HM @ t.P @ HM.T + R
         K = t.P @ HM.T @ np.linalg.inv(S)
         t.x = t.x + K @ (z - HM @ t.x)
@@ -111,14 +125,18 @@ class PitchTracker:
         t.lost = 0
         t.last_frame = frame
         t.obs.append((frame, z.copy(), R.copy(), di, float(score)))
+        if label >= 0:
+            t.team_votes[label] += 1
         if desc is not None and np.isfinite(desc[0]):
             t.app = desc.copy() if t.app is None else _renorm(0.9 * t.app + 0.1 * desc)
         if not t.confirmed and t.hits >= self.min_hits:
             t.confirmed = True
 
     def step(self, frame: int, z: np.ndarray, R: np.ndarray, scores: np.ndarray, desc: np.ndarray | None = None,
-             visible=None) -> dict[int, int]:
+             visible=None, labels: np.ndarray | None = None) -> dict[int, int]:
         """Advance one processed frame. z: (N,2) pitch positions, R: (N,2,2) covariances.
+
+        labels: optional (N,) team of each detection from its kit colour (0 / 1, -1 = unsure).
 
         visible: optional callable (M,2) -> bool mask telling whether pitch points are in the
         camera view; a track that leaves the view is ended right away (it will be re-linked by
@@ -131,26 +149,28 @@ class PitchTracker:
         hi = np.nonzero(scores >= self.high)[0]
         lo = np.nonzero((scores >= self.low) & (scores < self.high))[0]
         d_all = desc
+        lab = np.full(len(z), -1, int) if labels is None else np.asarray(labels, int)
 
         conf = [t for t in self.tracks if t.confirmed]
         tent = [t for t in self.tracks if not t.confirmed]
         # 1) confident detections vs confirmed tracks
         dsub = None if d_all is None else d_all[hi]
-        pairs, um_t, um_d = self._match(conf, z[hi], R[hi], dsub, self.gate)
+        pairs, um_t, um_d = self._match(conf, z[hi], R[hi], dsub, self.gate, lab[hi])
         for i, j in pairs:
-            self._update(conf[i], frame, z[hi[j]], R[hi[j]], scores[hi[j]], int(hi[j]), None if d_all is None else d_all[hi[j]])
+            self._update(conf[i], frame, z[hi[j]], R[hi[j]], scores[hi[j]], int(hi[j]),
+                         None if d_all is None else d_all[hi[j]], lab[hi[j]])
         rem_t = [conf[i] for i in um_t]
         rem_hi = hi[um_d]
         # 2) weak detections vs the remaining confirmed tracks (tighter gate, no appearance: weak boxes are partial)
-        pairs, um_t2, _ = self._match(rem_t, z[lo], R[lo], None, self.gate * 0.5)
+        pairs, um_t2, _ = self._match(rem_t, z[lo], R[lo], None, self.gate * 0.5, lab[lo])
         for i, j in pairs:
             self._update(rem_t[i], frame, z[lo[j]], R[lo[j]], scores[lo[j]], int(lo[j]), None)
         # 3) remaining confident detections vs tentative tracks
         dsub = None if d_all is None else d_all[rem_hi]
-        pairs, _, um_d3 = self._match(tent, z[rem_hi], R[rem_hi], dsub, self.gate)
+        pairs, _, um_d3 = self._match(tent, z[rem_hi], R[rem_hi], dsub, self.gate, lab[rem_hi])
         for i, j in pairs:
             k = int(rem_hi[j])
-            self._update(tent[i], frame, z[k], R[k], scores[k], k, None if d_all is None else d_all[k])
+            self._update(tent[i], frame, z[k], R[k], scores[k], k, None if d_all is None else d_all[k], lab[k])
         # 4) births
         for j in um_d3:
             k = int(rem_hi[j])
@@ -159,6 +179,8 @@ class PitchTracker:
             P0[2, 2] = P0[3, 3] = self.init_speed_sigma ** 2
             t = Track(self._next, np.r_[z[k], 0.0, 0.0], P0, start=frame, last_frame=frame)
             t.obs.append((frame, z[k].copy(), R[k].copy(), k, float(scores[k])))
+            if lab[k] >= 0:
+                t.team_votes[lab[k]] += 1
             if d_all is not None and np.isfinite(d_all[k][0]):
                 t.app = d_all[k].copy()
             self._next += 1

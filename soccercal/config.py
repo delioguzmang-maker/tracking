@@ -40,6 +40,8 @@ class Config:
     track_low: float = 0.15
     max_lost_s: float = 1.0
     stitch_max_gap_s: float = 60.0
+    players_per_team: int | None = 11  # at most this many identities per team (10 outfield + GK):
+    # fragments of the same player are joined until the count fits; None = no limit
     # ---------------------------------------------------------------- output
     out_fps: float = 10.0  # SkillCorner delivers 10 fps
     extrapolate: bool = True  # fill off-screen players (is_detected = False)

@@ -43,6 +43,8 @@ class Tracklet:
     v0: np.ndarray = field(default_factory=lambda: np.zeros(2))
     p1: np.ndarray = field(default_factory=lambda: np.zeros(2))
     v1: np.ndarray = field(default_factory=lambda: np.zeros(2))
+    s0: float = 0.0  # position uncertainty (m, largest axis) at the start / end
+    s1: float = 0.0
 
     @property
     def start(self) -> int:
@@ -69,10 +71,12 @@ def endpoints(tl: Tracklet, fps: float, window_s: float = 0.6) -> None:
                 v = v / sp * 10.0
         else:
             p, v = (z[0] if side == 0 else z[-1]), np.zeros(2)
+        Rm = tl.R[m][:3] if side == 0 else tl.R[m][-3:]
+        sig = float(np.sqrt(np.linalg.eigvalsh(Rm.mean(0))[-1])) if len(Rm) else 0.0
         if side == 0:
-            tl.p0, tl.v0 = p, v
+            tl.p0, tl.v0, tl.s0 = p, v, sig
         else:
-            tl.p1, tl.v1 = p, v
+            tl.p1, tl.v1, tl.s1 = p, v, sig
 
 
 class TeamMotion:
@@ -141,10 +145,12 @@ def link_cost(a: Tracklet, b: Tracklet, fps: float, cfg: StitchConfig, motion: T
         drift = cfg.team_follow * motion.shift(a.team, a.end + int(h * fps), b.start)
     pred_a = a.p1 + a.v1 * h + drift
     pred_b = b.p0 - b.v0 * h - drift
-    if np.linalg.norm(b.p0 - a.p1 - drift) > cfg.vmax * dt + cfg.slack:
+    # far from the camera a box a few pixels off moves the player metres in depth
+    slack = cfg.slack + 2.0 * (a.s1 + b.s0)
+    if np.linalg.norm(b.p0 - a.p1 - drift) > cfg.vmax * dt + slack:
         return np.inf
     err = 0.5 * (np.linalg.norm(pred_a - b.p0) + np.linalg.norm(pred_b - a.p1))
-    scale = cfg.slack + cfg.sigma_v * dt
+    scale = slack + cfg.sigma_v * dt
     c = err / scale
     if same_number:
         c *= 0.3  # the shirt number says it is the same player

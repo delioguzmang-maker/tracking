@@ -116,3 +116,54 @@ def test_gap_filling_kinds():
     assert np.isnan(s.pos[out_t > 6.5]).all()  # nothing beyond the extrapolation horizon
     gap = (out_t > 2.0) & (out_t < 2.4)
     assert np.allclose(s.pos[gap, 0], 2 * out_t[gap], atol=0.3)  # Hermite follows the motion
+
+
+def test_other_team_kit_is_never_taken_over():
+    """Two players of different teams cross at the same spot (worst case: positions alone
+    cannot tell them apart); the kit labels must keep the tracks on their own players."""
+    t = np.arange(0, 4, 1 / FPS)
+    a = np.c_[-10 + 5 * t, 0.05 + 0 * t]
+    b = np.c_[10 - 5 * t, -0.05 + 0 * t]
+    rng = np.random.default_rng(3)
+    tr = PitchTracker(FPS)
+    R = np.eye(2) * 0.3 ** 2
+    for k in range(len(t)):
+        z = np.array([a[k], b[k]]) + rng.normal(0, 0.3, (2, 2))
+        tr.step(k, z, np.repeat(R[None], 2, 0), np.full(2, 0.9), labels=np.array([0, 1]))
+    for track in tr.close():
+        assert len({o[3] for o in track.obs}) == 1  # detection 0 is always a, 1 always b
+
+
+def test_split_by_team():
+    from soccercal.players import split_by_team
+    labs = np.array([1] * 30 + [-1, 0] + [1] * 10 + [0] * 25)  # a blip of 0 inside, then a real change
+    parts = split_by_team(labs)
+    assert len(parts) == 2 and parts[0][0] == 0 and parts[-1][1] == len(labs)
+    assert 40 <= parts[0][1] <= 43
+    assert split_by_team(np.array([-1] * 10)) == [(0, 10)]
+
+
+def test_roster_fill_joins_fragments_to_ten_per_team():
+    """12 fragments of 10 players (two leave the view and come back): 10 identities, and the
+    returning fragments are joined to the right players."""
+    from soccercal.config import Config
+    from soccercal.players import fill_roster
+    idents, pid = [], 1
+    for p in range(10):
+        y = -27.0 + 6 * p
+        if p < 2:  # leaves the view at 4 s, back at 8 s, 2 m further along
+            parts = [(0, 100, [-10.0, y]), (200, 300, [-10.0 + 2.0, y])]
+        else:
+            parts = [(0, 300, [-10.0, y])]
+        for f0, f1, p0 in parts:
+            tl = _tl(pid, f0, f1, p0, [0.0, 0.0], team=0)
+            tl.player = p
+            idents.append(Identity(pid, 0, "player", [tl]))
+            pid += 1
+    from soccercal.stitch import endpoints
+    for i in idents:
+        endpoints(i.tracklets[0], FPS)
+    out = fill_roster(idents, Config(), FPS, None)
+    assert len(out) == 10
+    for i in out:
+        assert len({t.player for t in i.tracklets}) == 1

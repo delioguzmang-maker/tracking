@@ -11,7 +11,7 @@ from .camera import Camera
 from .config import Config
 from .detect import DESC_DIM
 from .jersey import vote_number
-from .stitch import StitchConfig, TeamMotion, Tracklet, stitch
+from .stitch import StitchConfig, TeamMotion, Tracklet, link_cost, stitch
 from .teams import OTHER, TeamModel, decide, fit_team_model
 from .tracker import PitchTracker, rts_smooth
 
@@ -25,6 +25,7 @@ class Measurement:
     score: np.ndarray
     det_idx: np.ndarray  # index into the frame's person detections
     desc: np.ndarray  # (N,D) float, NaN rows when unknown
+    label: np.ndarray | None = None  # (N,) team from the kit colour: 0 / 1, -1 = unsure or not a team kit
 
 
 def measure(fd, cam: Camera, cfg: Config) -> Measurement:
@@ -111,6 +112,9 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
     if len(X) > 20000:
         X = X[np.random.default_rng(0).choice(len(X), 20000, replace=False)]
     tm = fit_team_model(X) if len(X) >= 10 else None
+    for m in meas:
+        if m is not None:
+            m.label = kit_labels(tm, m.desc)
 
     # ---- online tracking on the pitch, restarted at every discontinuity
     trackers_out = []
@@ -132,23 +136,27 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
             return (z > 0) & (uv[:, 0] > -5) & (uv[:, 0] < c.width + 5) & (uv[:, 1] > -5) & (uv[:, 1] < c.height + 5)
 
         desc = m.desc if tm is not None else None
-        tracker.step(i, m.xy, m.R, m.score, desc, visible)
+        tracker.step(i, m.xy, m.R, m.score, desc, visible, labels=m.label)
     if tracker is not None:
         trackers_out += tracker.close()
 
-    # ---- tracklets with team votes
-    tls = []
+    # ---- tracklets with team votes; a track whose kit changes team is two people: split it
+    pieces = []
     for t in trackers_out:
-        if len(t.obs) < 3:
+        labs = np.array([meas[o[0]].label[o[3]] for o in t.obs])
+        pieces += [t.obs[a:b] for a, b in split_by_team(labs)]
+    tls = []
+    for k, obs in enumerate(pieces, start=1):
+        if len(obs) < 3:
             continue
-        fr = np.array([o[0] for o in t.obs])
-        z = np.array([o[1] for o in t.obs])
-        R = np.array([o[2] for o in t.obs])
-        di = np.array([o[3] for o in t.obs])
-        sc = np.array([o[4] for o in t.obs])
+        fr = np.array([o[0] for o in obs])
+        z = np.array([o[1] for o in obs])
+        R = np.array([o[2] for o in obs])
+        di = np.array([o[3] for o in obs])
+        sc = np.array([o[4] for o in obs])
         descs = np.array([meas[f].desc[d] for f, d in zip(fr, di)])  # d = measurement row
         good = np.isfinite(descs[:, 0])
-        tl = Tracklet(t.id, fr, z, R, sc, di)
+        tl = Tracklet(k, fr, z, R, sc, di)
         tl.outside = outside_share(z, cfg)
         for f, d in zip(fr, di):  # shirt numbers read on this person
             jr = an.frames[f].jersey
@@ -188,6 +196,7 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
     _assign_goalkeepers(idents, cfg)
     mark_assistant_referees(idents, cfg)
     idents = merge_unique_roles(idents)
+    idents = fill_roster(idents, cfg, fps, motion, scfg)
     for ident in idents:
         _trajectory(ident, fps)
 
@@ -214,6 +223,46 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
             t.team = ident.team
     motion = TeamMotion([t for i in idents for t in i.tracklets], fps, n)
     return TrackingOutput(idents, tm, colors, assignments, meas, motion)
+
+
+def kit_labels(tm: TeamModel | None, desc: np.ndarray, margin: float = 0.2) -> np.ndarray:
+    """Per-detection team from the kit colour: 0 / 1 when the nearest colour group is a team
+    and the second nearest is clearly further away; -1 otherwise (referee, goalkeeper, unsure)."""
+    out = np.full(len(desc), -1, int)
+    if tm is None or len(desc) == 0:
+        return out
+    ok = np.isfinite(desc[:, 0])
+    if not ok.any():
+        return out
+    d = tm.distances(desc[ok])
+    order = np.sort(d, 1)
+    near = np.argmin(d, 1)
+    sure = (near < 2) & (order[:, 1] - order[:, 0] > margin)
+    out[np.nonzero(ok)[0][sure]] = near[sure]
+    return out
+
+
+def split_by_team(labels: np.ndarray, min_run: int = 4) -> list[tuple[int, int]]:
+    """Index ranges of a track, cut where the kit changes team for good (>= ``min_run``
+    consecutive sure labels of the other team). Unsure labels (-1) and short blips don't cut."""
+    sure = np.nonzero(labels >= 0)[0]
+    if len(sure) == 0:
+        return [(0, len(labels))]
+    runs = []  # [team, first index, last index, count]
+    for k in sure:
+        if runs and runs[-1][0] == labels[k]:
+            runs[-1][2], runs[-1][3] = k, runs[-1][3] + 1
+        else:
+            runs.append([int(labels[k]), k, k, 1])
+    runs = [r for r in runs if r[3] >= min_run] or [max(runs, key=lambda r: r[3])]
+    merged = [runs[0]]
+    for r in runs[1:]:
+        if r[0] == merged[-1][0]:
+            merged[-1][2] = r[2]
+        else:
+            merged.append(r)
+    cuts = [0] + [(a[2] + b[1] + 1) // 2 for a, b in zip(merged[:-1], merged[1:])] + [len(labels)]
+    return list(zip(cuts[:-1], cuts[1:]))
 
 
 def outside_share(z: np.ndarray, cfg: Config, tol: float = 0.75) -> float:
@@ -298,6 +347,91 @@ def _median_gap(host: Identity, other: Identity) -> float:
         return np.inf
     p = np.stack([np.interp(of[inside], hf, hz[:, 0]), np.interp(of[inside], hf, hz[:, 1])], 1)
     return float(np.median(np.linalg.norm(oz[inside] - p, axis=1)))
+
+
+def fill_roster(idents: list[Identity], cfg: Config, fps: float, motion: TeamMotion | None,
+                scfg: StitchConfig | None = None, min_keep_s: float = 1.0) -> list[Identity]:
+    """A team has 10 outfield players on the pitch. When a team has more outfield identities
+    than that, some are the same player seen again: join them.
+
+    Optimal assignment over the tracklets of the team: every tracklet gets a predecessor,
+    either a tracklet that ended before it started (cost = team-motion-compensated
+    kinematic + kit link cost; impossible moves and different shirt numbers are forbidden;
+    links already made by the stitcher get a large bonus, so they are only broken to fit a
+    fragment into a gap), one of the 10 free slots (cost 0), or an extra slot (large cost).
+    Fragments shorter than ``min_keep_s`` that still do not fit are duplicate boxes: they are
+    absorbed by the nearest teammate (drawn, not exported)."""
+    if not cfg.players_per_team:
+        return idents
+    from scipy.optimize import linear_sum_assignment
+
+    k_max = cfg.players_per_team - 1
+    relaxed = StitchConfig(**{**(scfg.__dict__ if scfg else {}), "max_gap_s": 1e9})
+    BIG, EXTRA, BONUS = 1e9, 1e4, 100.0
+    out = [i for i in idents if not (i.team in (0, 1) and i.role == "player")]
+    for team in (0, 1):
+        grp = [i for i in idents if i.team == team and i.role == "player"]
+        if len(grp) <= k_max:
+            out += grp
+            continue
+        T, owner = [], []
+        for gi, ident in enumerate(grp):
+            for t in sorted(ident.tracklets, key=lambda t: t.start):
+                T.append(t)
+                owner.append(gi)
+        n = len(T)
+        num = [grp[o].number for o in owner]
+        C = np.full((n, n), BIG)
+        for a in range(n):
+            for b in range(n):
+                if T[a].end >= T[b].start or (num[a] is not None and num[b] is not None and num[a] != num[b]):
+                    continue
+                c = link_cost(T[a], T[b], fps, relaxed, motion)
+                if np.isfinite(c):
+                    C[a, b] = c
+        for a in range(n - 1):  # the stitcher's own links (consecutive tracklets of one identity)
+            if owner[a] == owner[a + 1]:
+                C[a, a + 1] = min(C[a, a + 1], 0.0) - BONUS
+        M = np.vstack([C, np.zeros((k_max, n)), np.full((n, n), EXTRA)])
+        rows, cols = linear_sum_assignment(M)
+        pred = {int(c): int(r) for r, c in zip(rows, cols) if r < n and M[r, c] < BIG}
+        succ = {r: c for c, r in pred.items()}
+        paths = []
+        for b in range(n):
+            if b not in pred:
+                path = [b]
+                while path[-1] in succ:
+                    path.append(succ[path[-1]])
+                paths.append(path)
+        new, used = [], set()
+        for path in sorted(paths, key=lambda p: -sum(len(T[k].frames) for k in p)):
+            frames_by_owner: dict = {}
+            for k in path:
+                frames_by_owner[owner[k]] = frames_by_owner.get(owner[k], 0) + len(T[k].frames)
+            host = grp[max(frames_by_owner, key=lambda o: (o not in used, frames_by_owner[o]))]
+            pid = host.pid if host.pid not in {i.pid for i in new} else None
+            numbers = [grp[o].number for o in frames_by_owner if grp[o].number is not None]
+            votes = sum(grp[o].number_votes for o in frames_by_owner if grp[o].number is not None)
+            ident = Identity(pid if pid is not None else -1, team, "player", [T[k] for k in path],
+                             number=numbers[0] if numbers else None, number_votes=votes, kit_group=host.kit_group)
+            used.add(grp.index(host))
+            new.append(ident)
+        free = iter(sorted({i.pid for i in grp} - {i.pid for i in new}))
+        for ident in new:
+            if ident.pid == -1:
+                ident.pid = next(free)
+        if len(new) > k_max:  # did not fit: very short leftovers are duplicate boxes
+            keep = []
+            for ident in sorted(new, key=lambda i: -sum(len(t.frames) for t in i.tracklets)):
+                span = (ident.tracklets[-1].end - ident.tracklets[0].start + 1) / fps
+                if len(keep) >= k_max and span < min_keep_s:
+                    host = min(keep, key=lambda h: _median_gap(h, ident))
+                    host.absorbed += ident.tracklets
+                else:
+                    keep.append(ident)
+            new = keep
+        out += new
+    return sorted(out, key=lambda i: i.pid)
 
 
 def merge_by_number(idents: list[Identity]) -> list[Identity]:
