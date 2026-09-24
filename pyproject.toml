@@ -19,6 +19,7 @@ dependencies = [
     "tqdm",
     "certifi",
     "matplotlib",
+    "rapidocr_onnxruntime>=1.3",  # shirt numbers (OCR models ship inside the wheel)
 ]
 
 [project.optional-dependencies]

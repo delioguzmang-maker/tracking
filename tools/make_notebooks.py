@@ -162,8 +162,13 @@ write("01_tu_partido.ipynb", [
    procesar el partido entero.
 
 Tiempos orientativos por minuto de vídeo a 25 fps: Colab GPU T4 ≈ 1 min, Mac M1/M2 ≈ 2–3 min,
-CPU ≈ 30 min. Para un partido completo usa `stride=2` (analiza 12,5 fotogramas por segundo; la salida
-sigue siendo 10 fps).
+CPU ≈ 30 min. Los vídeos a 50/60 fps se analizan automáticamente a ~25 fotogramas por segundo; para ir
+aún más rápido en un partido completo usa `stride` = el doble de lo automático (la salida sigue a 10 fps).
+
+**Qué se descarta a propósito** (como hace SkillCorner): primeros planos de jugadores o entrenadores,
+planos del público o del banquillo, repeticiones desde otras cámaras. Ahí no se generan posiciones y el
+vídeo de verificación lo indica con un aviso. Los entrenadores, jueces de línea y suplentes que aparecen
+fuera de las líneas **no** se cuentan como jugadores.
 """),
     code(SETUP),
     md("## Elegir el vídeo"),
@@ -185,7 +190,8 @@ print(VIDEO)
 | parámetro | qué hace |
 |---|---|
 | `start_s`, `max_seconds` | tramo a procesar (segundos) |
-| `stride` | 1 = todos los fotogramas; 2 = la mitad (el doble de rápido) |
+| `stride` | `None` = automático (~25 fotogramas analizados por segundo); 2 = la mitad de eso |
+| `jersey_ocr` | leer dorsales (la etiqueta pasa de `id12` a `#17` cuando se lee con seguridad) |
 | `det_model` | `yolo11m.pt` (equilibrado), `yolo11s.pt` (rápido), `yolo11x.pt` (preciso) |
 | `home_name`, `away_name` | nombres de los equipos (el "local" es el primer color detectado; revisa `summary.json`) |
 | `period`, `time_offset_s` | parte del partido y minuto de reloj del primer fotograma |
@@ -196,8 +202,9 @@ import soccercal
 from soccercal import Config
 cfg = Config(
     start_s=0, max_seconds=60,      # <- primero 60 s; luego None para todo
-    stride=1,
+    stride=None,                    # automático
     det_model="yolo11m.pt",
+    jersey_ocr=True,                # leer dorsales
     home_name="Local", away_name="Visitante",
     period=1, time_offset_s=0,
 )

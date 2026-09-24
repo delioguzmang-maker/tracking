@@ -10,6 +10,7 @@ from .analysis import Analysis
 from .camera import Camera
 from .config import Config
 from .detect import DESC_DIM
+from .jersey import vote_number
 from .stitch import StitchConfig, TeamMotion, Tracklet, stitch
 from .teams import OTHER, TeamModel, decide, fit_team_model
 from .tracker import PitchTracker, rts_smooth
@@ -70,9 +71,11 @@ def measure(fd, cam: Camera, cfg: Config) -> Measurement:
 class Identity:
     pid: int
     team: int  # 0, 1 or OTHER
-    role: str  # "player", "goalkeeper", "referee"
+    role: str  # "player", "goalkeeper", "referee", "assistant_referee", "staff" (coach, bench, ball boy)
     tracklets: list[Tracklet]
     color_bgr: tuple = (128, 128, 128)
+    number: int | None = None  # shirt number read by OCR (None = unknown)
+    number_votes: int = 0
     # trajectory on the analysed-frame grid
     frames: np.ndarray = field(default_factory=lambda: np.zeros(0, int))
     pos: np.ndarray = field(default_factory=lambda: np.zeros((0, 2)))
@@ -144,11 +147,18 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
         descs = np.array([meas[f].desc[d] for f, d in zip(fr, di)])  # d = measurement row
         good = np.isfinite(descs[:, 0])
         tl = Tracklet(t.id, fr, z, R, sc, di)
+        tl.outside = outside_share(z, cfg)
+        for f, d in zip(fr, di):  # shirt numbers read on this person
+            jr = an.frames[f].jersey
+            p = int(meas[f].det_idx[d])
+            if jr and p in jr:
+                tl.jersey_reads.append(jr[p])
+        tl.number, _ = vote_number(tl.jersey_reads)
+        if good.any() and tm is not None:
+            tl.team, tl.team_conf = decide(tm.distances(descs[good]), has_number=tl.number is not None)
         if good.any():
             md = descs[good].mean(0)
             tl.desc = md / (np.linalg.norm(md) + 1e-9)
-            if tm is not None:
-                tl.team, tl.team_conf = decide(tm.distances(descs[good]))
         tls.append(tl)
 
     # ---- stitching into identities
@@ -157,23 +167,32 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
     chains = stitch(tls, fps, scfg, n_frames=n, motion=motion)
     idents = []
     for k, ch in enumerate(chains, start=1):
+        number, votes = vote_number([r for t in ch for r in t.jersey_reads])
         team, conf = OTHER, 0.0
         if tm is not None:
-            D = [tm.distances(meas[f].desc[d][None]) for t in ch for f, d in zip(t.frames, t.det_idx)
-                 if np.isfinite(meas[f].desc[d][0])]
+            D = [meas[f].desc[d] for t in ch for f, d in zip(t.frames, t.det_idx) if np.isfinite(meas[f].desc[d][0])]
             if D:
-                team, conf = decide(np.concatenate(D))
-        idents.append(Identity(k, team, "player" if team != OTHER else "referee", ch))
+                team, conf = decide(tm.distances(np.array(D)), has_number=number is not None)
+        ident = Identity(k, team, "player" if team != OTHER else "referee", ch, number=number, number_votes=votes)
+        z = np.concatenate([t.z for t in ch])
+        if outside_share(z, cfg) >= cfg.staff_outside_share:
+            # lives outside the lines: coach, assistant referee, substitute, ball boy -> not a player
+            ident.team, ident.role = OTHER, "staff"
+        idents.append(ident)
+    idents = merge_by_number(idents)
     _assign_goalkeepers(idents, cfg)
+    mark_assistant_referees(idents, cfg)
+    idents = merge_unique_roles(idents)
     for ident in idents:
         _trajectory(ident, fps)
 
     # ---- team colours (for drawing / match.json)
-    colors = []
+    raw = []
     for tm_ in (0, 1):
-        cols = [an.frames[f].color[meas[f].det_idx[d]] for ident in idents if ident.team == tm_
+        cols = [an.frames[f].color[meas[f].det_idx[d]] for ident in idents if ident.team == tm_ and ident.role == "player"
                 for t in ident.tracklets for f, d in zip(t.frames, t.det_idx)]
-        colors.append(tuple(int(v) for v in np.median(np.array(cols), 0)) if cols else ((0, 0, 255) if tm_ == 0 else (255, 0, 0)))
+        raw.append(np.median(np.array(cols), 0) if cols else None)
+    colors = kit_display_colors(raw)
 
     assignments = [dict() for _ in range(n)]
     for ident in idents:
@@ -186,6 +205,103 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
             t.team = ident.team
     motion = TeamMotion([t for i in idents for t in i.tracklets], fps, n)
     return TrackingOutput(idents, tm, colors, assignments, meas, motion)
+
+
+def outside_share(z: np.ndarray, cfg: Config, tol: float = 0.75) -> float:
+    """Fraction of positions clearly outside the touch / goal lines."""
+    if len(z) == 0:
+        return 0.0
+    out = (np.abs(z[:, 0]) > cfg.pitch_length / 2 + tol) | (np.abs(z[:, 1]) > cfg.pitch_width / 2 + tol)
+    return float(out.mean())
+
+
+def mark_assistant_referees(idents: list[Identity], cfg: Config) -> None:
+    """A referee-coloured person who lives on a touchline is an assistant referee."""
+    for ident in idents:
+        if ident.role == "referee":
+            z = np.concatenate([t.z for t in ident.tracklets])
+            if np.median(np.abs(z[:, 1])) > cfg.pitch_width / 2 - 1.5:
+                ident.role = "assistant_referee"
+
+
+def merge_unique_roles(idents: list[Identity]) -> list[Identity]:
+    """There is one referee on the pitch and one goalkeeper per team: their fragments that
+    never appear at the same time are the same person."""
+    drop = set()
+    for key in [("referee", OTHER), ("goalkeeper", 0), ("goalkeeper", 1)]:
+        grp = sorted([i for i in idents if i.role == key[0] and (key[0] == "referee" or i.team == key[1])],
+                     key=lambda i: -sum(len(t.frames) for t in i.tracklets))
+        if len(grp) < 2:
+            continue
+        host = grp[0]
+        used = set(int(f) for t in host.tracklets for f in t.frames)
+        for other in grp[1:]:
+            fr = set(int(f) for t in other.tracklets for f in t.frames)
+            if fr & used:
+                continue
+            host.tracklets = sorted(host.tracklets + other.tracklets, key=lambda t: t.start)
+            used |= fr
+            drop.add(other.pid)
+    return [i for i in idents if i.pid not in drop]
+
+
+def merge_by_number(idents: list[Identity]) -> list[Identity]:
+    """Fragments of one player that carry the same team + shirt number and never appear at
+    the same time are the same person: merge them (the kinematic stitcher could not, e.g.
+    after a long time off-screen). Two identities with the same number *at the same time*
+    are a conflict: the one with fewer votes loses its number."""
+    groups: dict[tuple, list[Identity]] = {}
+    for ident in idents:
+        if ident.number is not None and ident.team in (0, 1) and ident.role != "staff":
+            groups.setdefault((ident.team, ident.number), []).append(ident)
+    drop = set()
+    for (_, _), g in groups.items():
+        g.sort(key=lambda i: -i.number_votes)
+        keep = []
+        for ident in g:
+            fr = set(int(f) for t in ident.tracklets for f in t.frames)
+            host = next((k for k in keep if not fr & k[1]), None)
+            if host is None:
+                if keep:  # overlaps every kept identity with that number: its reading is wrong
+                    ident.number = None
+                else:
+                    keep.append((ident, fr))
+                continue
+            host[0].tracklets = sorted(host[0].tracklets + ident.tracklets, key=lambda t: t.start)
+            host[0].number_votes += ident.number_votes
+            host[1].update(fr)
+            drop.add(ident.pid)
+    return [i for i in idents if i.pid not in drop]
+
+
+def kit_display_colors(raw: list) -> list:
+    """Readable team colours from the median shirt colour (BGR): saturated and bright for
+    coloured kits, near-black / near-white for dark / white kits; if the two teams would
+    look alike, fall back to red vs blue."""
+    import cv2
+
+    out = []
+    for c in raw:
+        if c is None:
+            out.append(None)
+            continue
+        h, s, v = cv2.cvtColor(np.uint8([[c]]), cv2.COLOR_BGR2HSV)[0, 0].astype(int)
+        if v < 95:  # dark kit (navy, black): shade makes its hue meaningless
+            out.append((45, 45, 45))
+        elif s < 70:  # white / grey kit
+            v2 = 45 if v < 110 else 235
+            out.append((v2, v2, v2))
+        else:
+            b, g, r = cv2.cvtColor(np.uint8([[[h, max(s, 200), max(v, 210)]]]), cv2.COLOR_HSV2BGR)[0, 0]
+            out.append((int(b), int(g), int(r)))
+    fallback = [(40, 40, 230), (230, 120, 20)]
+    for k in (0, 1):
+        if out[k] is None:
+            out[k] = fallback[k]
+    a, b = np.array(out[0], float), np.array(out[1], float)
+    if np.linalg.norm(a - b) < 90:
+        out = fallback
+    return [tuple(int(x) for x in c) for c in out]
 
 
 def defending_sides(idents: list[Identity]) -> dict:
@@ -220,7 +336,7 @@ def _assign_goalkeepers(idents: list[Identity], cfg: Config) -> None:
     for side in (-1, 1):
         best, best_d = None, np.inf
         for ident in idents:
-            if ident.team != OTHER:
+            if ident.team != OTHER or ident.role == "staff":
                 continue
             z = np.concatenate([t.z for t in ident.tracklets])
             if len(z) < 5:

@@ -40,7 +40,7 @@ def team_ids() -> dict:
 def match_json(res) -> dict:
     cfg = res.config
     tids = team_ids()
-    ids = [i for i in res.tracking.identities if i.team in (0, 1)]
+    ids = [i for i in res.tracking.identities if i.team in (0, 1) and i.role in ("player", "goalkeeper")]
     n = len(res.out_t)
     dur = (res.out_t[-1] - res.out_t[0]) if n else 0.0
     players = []
@@ -53,10 +53,10 @@ def match_json(res) -> dict:
             "trackable_object": int(ident.pid),
             "team_id": tids[ident.team],
             "team_player_id": int(ident.pid),
-            "number": None,
+            "number": ident.number,  # read from the shirt by OCR, None if never readable
             "first_name": team_name,
-            "last_name": f"#{ident.pid}",
-            "short_name": f"{team_name[:1]}{ident.pid}",
+            "last_name": f"#{ident.number}" if ident.number is not None else f"id{ident.pid}",
+            "short_name": f"#{ident.number}" if ident.number is not None else f"id{ident.pid}",
             "player_role": ROLE_GK if ident.role == "goalkeeper" else ROLE_UNKNOWN,
             "start_time": _ts(start) if start > 0.05 else "00:00:00",
             "end_time": _ts(end).split(".")[0],
@@ -102,7 +102,7 @@ def tracking_frames(res):
     an = res.analysis
     frame_t = np.array([fd.t for fd in an.frames])
     t0 = res.out_t[0] if len(res.out_t) else 0.0
-    tab = res.table[res.table["role"] != "referee"] if len(res.table) else res.table
+    tab = res.table[res.table["role"].isin(["player", "goalkeeper"])] if len(res.table) else res.table
     by_frame = {k: g for k, g in tab.groupby("frame")} if len(tab) else {}
     team_of = {i.pid: i.team for i in res.tracking.identities}
     # NaN (unknown ball) propagates through the interpolation, as it should
@@ -127,11 +127,16 @@ def tracking_frames(res):
         # ball: detected only if a detection exists within half a frame of the analysed grid
         near_det = bool(res.ball_det[i]) and bool(abs(frame_t[i] - t) <= 0.5 / fps_an + 1e-6)
         bx, by = ball_x[k], ball_y[k]
+        if cam is not None and not (np.isfinite(bx) and np.isfinite(by)) and poss_pid is not None and t - last_seen <= 2.0:
+            # ball not seen but a player had it a moment ago: it is at his feet (dribbling, shielding)
+            p = next((q for q in players if q["player_id"] == poss_pid), None)
+            if p is not None:
+                bx, by, near_det = p["x"], p["y"], False
         ball_ok = cam is not None and np.isfinite(bx) and np.isfinite(by)
         ball = {"x": round(float(bx), 2) if ball_ok else None, "y": round(float(by), 2) if ball_ok else None,
                 "z": None, "is_detected": near_det if ball_ok else None}
         # possession: team of the closest player within 1.5 m of a seen ball (with memory)
-        if ball_ok and players:
+        if ball_ok and near_det and players:
             P = np.array([[p["x"], p["y"]] for p in players])
             d = np.hypot(P[:, 0] - bx, P[:, 1] - by)
             j = int(np.argmin(d))

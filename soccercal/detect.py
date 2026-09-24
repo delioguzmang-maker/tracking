@@ -33,18 +33,30 @@ class Detections:
         return Detections(np.zeros((0, 4)), np.zeros(0), np.zeros(0, int))
 
 
+PERSON_NAMES = {"person", "player", "goalkeeper", "referee"}
+BALL_NAMES = {"sports ball", "ball", "football"}
+
+
 class PlayerDetector:
-    """YOLO11 on the full frame. ``model`` can be any Ultralytics checkpoint, e.g. a
-    football-specific one; COCO ``person`` / ``sports ball`` classes are used by default."""
+    """YOLO on the full frame. ``model`` can be any Ultralytics checkpoint: COCO models
+    (``person`` / ``sports ball``) or a football-specific one whose class names include
+    ``player`` / ``goalkeeper`` / ``referee`` / ``ball`` (much better at the ball)."""
 
     def __init__(self, model: str = "yolo11m.pt", device: str | None = None, imgsz: int = 1280,
-                 conf: float = 0.10, person_class: int = PERSON, ball_class: int | None = BALL, half: bool | None = None):
+                 conf: float = 0.10, person_class: int = PERSON, ball_class: int | None = BALL, half: bool | None = None,
+                 ball_conf: float = 0.03):
         from ultralytics import YOLO
 
         self.device = pick_device(device)
         self.model = YOLO(model)
+        names = {int(k): str(v).lower() for k, v in getattr(self.model, "names", {}).items()}
+        pers = [k for k, v in names.items() if v in PERSON_NAMES]
+        balls = [k for k, v in names.items() if v in BALL_NAMES]
+        self.person_classes = pers or [person_class]
+        self.ball_classes = balls or ([ball_class] if ball_class is not None else [])
         self.imgsz = imgsz
         self.conf = conf
+        self.ball_conf = ball_conf
         self.person_class = person_class
         self.ball_class = ball_class
         self.half = (self.device == "cuda") if half is None else half
@@ -62,15 +74,18 @@ class PlayerDetector:
         return {"half": True}
 
     def __call__(self, frames_bgr: list[np.ndarray]) -> list[Detections]:
-        classes = [self.person_class] + ([self.ball_class] if self.ball_class is not None else [])
-        res = self.model.predict(frames_bgr, imgsz=self.imgsz, conf=self.conf, classes=classes, device=self.device,
-                                 verbose=False, max_det=120, **self._precision_kw())
+        classes = self.person_classes + self.ball_classes
+        lo = min(self.conf, self.ball_conf) if self.ball_classes else self.conf
+        res = self.model.predict(frames_bgr, imgsz=self.imgsz, conf=lo, classes=classes, device=self.device,
+                                 verbose=False, max_det=150, **self._precision_kw())
         out = []
         for r in res:
             b = r.boxes
             cls = b.cls.cpu().numpy().astype(int)
-            cls = np.where(cls == self.person_class, PERSON, BALL)
-            out.append(Detections(b.xyxy.cpu().numpy().astype(np.float32), b.conf.cpu().numpy().astype(np.float32), cls))
+            sc = b.conf.cpu().numpy().astype(np.float32)
+            cls = np.where(np.isin(cls, self.person_classes), PERSON, BALL)
+            keep = np.where(cls == PERSON, sc >= self.conf, sc >= self.ball_conf)
+            out.append(Detections(b.xyxy.cpu().numpy().astype(np.float32)[keep], sc[keep], cls[keep]))
         return out
 
 
@@ -121,3 +136,17 @@ def jersey_descriptor(frame_bgr: np.ndarray, box: np.ndarray, grass_bgr: np.ndar
     hist = np.bincount(idx, minlength=DESC_DIM).astype(np.float64)
     hist = np.sqrt(hist / hist.sum())
     return hist.astype(np.float32)
+
+
+def ball_colour(frame: np.ndarray, boxes: np.ndarray) -> np.ndarray:
+    """(k, 2) uint8: median saturation and bright-pixel value of each ball candidate."""
+    out = np.zeros((len(boxes), 2), np.uint8)
+    H, W = frame.shape[:2]
+    for i, (x1, y1, x2, y2) in enumerate(boxes):
+        cx, cy, r = (x1 + x2) / 2, (y1 + y2) / 2, max(1.5, 0.3 * min(x2 - x1, y2 - y1))
+        a, b = int(max(0, cx - r)), int(min(W, cx + r + 1))
+        c, d = int(max(0, cy - r)), int(min(H, cy + r + 1))
+        if b > a and d > c:
+            hsv = cv2.cvtColor(frame[c:d, a:b], cv2.COLOR_BGR2HSV).reshape(-1, 3)
+            out[i] = (np.median(hsv[:, 1]), np.percentile(hsv[:, 2], 90))
+    return out

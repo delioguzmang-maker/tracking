@@ -30,6 +30,30 @@ def _ensure_contrast(bgr):
     return bgr
 
 
+SHOT_BANNER = {
+    "closeup": "PLANO DESCARTADO: primer plano (jugador / entrenador / publico) - no se usa",
+    "no_pitch": "PLANO DESCARTADO: publico / banquillo / graficos - no se usa",
+}
+
+
+def label_of(ident) -> str:
+    """What is written next to a person: the shirt number when it was read, else the track id."""
+    if ident.role == "referee":
+        return "ARB"
+    if ident.role == "assistant_referee":
+        return "JL"
+    base = f"#{ident.number}" if ident.number is not None else f"id{ident.pid}"
+    return base + (" GK" if ident.role == "goalkeeper" else "")
+
+
+def _banner(img, text):
+    s = img.shape[1] / 1920.0
+    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.1 * s, max(1, int(2 * s)))
+    cv2.rectangle(img, (0, 0), (tw + int(40 * s), th + int(40 * s)), (0, 0, 0), -1)
+    cv2.putText(img, text, (int(20 * s), th + int(20 * s)), cv2.FONT_HERSHEY_SIMPLEX, 1.1 * s, (0, 200, 255),
+                max(1, int(2 * s)), cv2.LINE_AA)
+
+
 class PitchCanvas:
     def __init__(self, width: int = PANEL_W, height: int = 600, length: float = pitch.LENGTH,
                  wdt: float = pitch.WIDTH, margin: float = 5.0):
@@ -114,7 +138,7 @@ def render_video(res, path: str | Path, progress: bool = True, max_frames: int |
     vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), an.proc_fps, out_size)
     by_index = {fd.index: i for i, fd in enumerate(an.frames)}
     trails: dict[int, list] = {}
-    stride = an.config.get("stride", 1)
+    stride = an.stride
     bar = None
     if progress:
         try:
@@ -129,29 +153,31 @@ def render_video(res, path: str | Path, progress: bool = True, max_frames: int |
             continue
         fd, cam = an.frames[i], res.cameras[i]
         img = fr.copy()
+        fs = an.width / 1920.0  # font scale
         if cam is not None and show_calibration:
             draw_calibration(img, cam, (255, 0, 255), max(1, int(round(an.width / 960))))
-        p = fd.det.persons()
-        asg = res.tracking.assignments[i]
-        for j, b in enumerate(p.boxes):
-            x1, y1, x2, y2 = b.astype(int)
-            pid = asg.get(j)
-            if pid is None:
-                cv2.rectangle(img, (x1, y1), (x2, y2), (160, 160, 160), 1)
-                continue
-            idn = ident[pid]
-            col = team_color(idn.team, colors)
-            cv2.rectangle(img, (x1, y1), (x2, y2), col, 2)
-            lab = f"{pid}" + ("GK" if idn.role == "goalkeeper" else "R" if idn.role == "referee" else "")
-            cv2.putText(img, lab, (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 3, cv2.LINE_AA)
-            cv2.putText(img, lab, (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2, cv2.LINE_AA)
-        if res.ball_det[i] and cam is not None:
-            uv, z = cam.project(np.array([[*res.ball_pos[i], 0.11]]))
-            if z[0] > 0:
-                cv2.circle(img, tuple(uv[0].astype(int)), 12, (0, 220, 255), 2, cv2.LINE_AA)
-        if cam is None:
-            cv2.putText(img, "sin calibracion (plano no utilizable)", (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.4,
-                        (0, 0, 255), 3, cv2.LINE_AA)
+        if cam is not None:  # nothing is drawn (or used) on discarded shots
+            p = fd.det.persons()
+            asg = res.tracking.assignments[i]
+            for j, b in enumerate(p.boxes):
+                x1, y1, x2, y2 = b.astype(int)
+                pid = asg.get(j)
+                if pid is None or ident[pid].role == "staff":
+                    continue  # coaches, assistant referees, bench, crowd: not players
+                idn = ident[pid]
+                col = team_color(idn.team, colors) if idn.role not in ("referee", "assistant_referee") else (0, 0, 0)
+                cv2.rectangle(img, (x1, y1), (x2, y2), col, 2)
+                lab = label_of(idn)
+                known = idn.number is not None or idn.role in ("referee", "assistant_referee")
+                sc = (0.9 if known else 0.6) * max(fs, 0.5)
+                cv2.putText(img, lab, (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, sc, (255, 255, 255), 4, cv2.LINE_AA)
+                cv2.putText(img, lab, (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, sc, col, 2, cv2.LINE_AA)
+            if res.ball_det[i]:
+                uv, z = cam.project(np.array([[*res.ball_pos[i], 0.11]]))
+                if z[0] > 0:
+                    cv2.circle(img, tuple(uv[0].astype(int)), int(14 * fs) + 4, (0, 220, 255), 2, cv2.LINE_AA)
+        else:
+            _banner(img, SHOT_BANNER.get(getattr(fd, "shot", ""), "SIN CALIBRACION: no se ven lineas del campo - no se usa"))
         top = cv2.resize(img, (PANEL_W, top_h), interpolation=cv2.INTER_AREA)
         # minimap at the nearest 10 fps output frame
         k = int(np.argmin(np.abs(res.out_t - fd.t))) if len(res.out_t) else -1
@@ -160,16 +186,21 @@ def render_video(res, path: str | Path, progress: bool = True, max_frames: int |
         if g is not None:
             for r in g.itertuples(index=False):
                 idn = ident[int(r.player_id)]
+                if idn.role not in ("player", "goalkeeper"):
+                    continue  # referees / staff are not drawn on the minimap
                 col = team_color(idn.team, colors)
-                players.append((r.x, r.y, int(r.player_id), col, bool(r.is_detected)))
+                players.append((r.x, r.y, label_of(idn), col, bool(r.is_detected)))
                 tr = trails.setdefault(int(r.player_id), [])
-                tr.append((r.x, r.y))
+                if tr and (k - tr[-1][0] > 1 or np.hypot(r.x - tr[-1][1], r.y - tr[-1][2]) > 3.0):
+                    tr.clear()  # the player was missing / jumped: do not draw a line across the gap
+                if not tr or tr[-1][0] != k:
+                    tr.append((k, r.x, r.y))
                 del tr[:-20]
         fp = cam.footprint() if cam is not None else None
         if fp is not None:
             fp = np.clip(fp, [-cfg.pitch_length / 2 - 5, -cfg.pitch_width / 2 - 5], [cfg.pitch_length / 2 + 5, cfg.pitch_width / 2 + 5])
-        ball = res.ball_pos[i] if res.ball_det[i] else None
-        tr_draw = {pid: (np.array(tr), team_color(ident[pid].team, colors)) for pid, tr in trails.items()}
+        ball = res.ball_pos[i] if cam is not None and np.isfinite(res.ball_pos[i]).all() else None
+        tr_draw = {pid: (np.array(tr)[:, 1:], team_color(ident[pid].team, colors)) for pid, tr in trails.items() if tr}
         mini = canvas.draw(players, ball, fp, tr_draw)
         cv2.putText(mini, f"t={fd.t:6.2f}s  frame {idx}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         vw.write(np.vstack([top, mini]))
@@ -200,10 +231,12 @@ def plot_frame(res, k: int, ax=None):
     g = res.table[res.table["frame"] == k]
     for r in g.itertuples(index=False):
         idn = ident[int(r.player_id)]
+        if idn.role not in ("player", "goalkeeper"):
+            continue
         c = np.array(team_color(idn.team, colors))[::-1] / 255.0
         ax.scatter(r.x, r.y, s=120, color=c if r.is_detected else "none", edgecolors=c if not r.is_detected else "white",
                    linewidths=2 if not r.is_detected else 1, zorder=3)
-        ax.text(r.x + 0.8, r.y + 0.8, str(r.player_id), color="white", fontsize=8, zorder=4)
+        ax.text(r.x + 0.8, r.y + 0.8, label_of(idn), color="white", fontsize=8, zorder=4)
     ax.set_xlim(-cfg.pitch_length / 2 - 5, cfg.pitch_length / 2 + 5)
     ax.set_ylim(-cfg.pitch_width / 2 - 5, cfg.pitch_width / 2 + 5)
     ax.set_aspect("equal")

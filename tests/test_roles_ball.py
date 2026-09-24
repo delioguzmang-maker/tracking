@@ -1,0 +1,121 @@
+"""Shot types, off-pitch staff, shirt numbers and the ball trajectory."""
+import numpy as np
+
+from soccercal.analysis import Analysis, FrameData
+from soccercal.ball import track_ball
+from soccercal.cameras import shot_type
+from soccercal.camtrack import Registration
+from soccercal.config import Config
+from soccercal.detect import BALL, PERSON, Detections
+from soccercal.jersey import vote_number
+from soccercal.players import (Identity, kit_display_colors, mark_assistant_referees, merge_by_number,
+                               merge_unique_roles, outside_share)
+from soccercal.stitch import Tracklet
+
+from conftest import look_at
+
+
+def _fd(boxes, scores, classes, t=0.0, grass=0.6):
+    det = Detections(np.asarray(boxes, np.float32).reshape(-1, 4), np.asarray(scores, np.float32),
+                     np.asarray(classes, int))
+    n = int((det.classes == PERSON).sum())
+    return FrameData(0, t, 0.0, grass, Registration(None, None), det, np.zeros((n, 108), np.uint8),
+                     np.zeros((n, 3), np.uint8))
+
+
+def test_shot_type():
+    cfg = Config()
+    wide = _fd([[100, 400, 130, 480]], [0.9], [PERSON])
+    closeup = _fd([[500, 100, 900, 1080]], [0.9], [PERSON])  # a person fills the frame
+    crowd = _fd([[100, 400, 130, 480]], [0.9], [PERSON], grass=0.05)
+    assert shot_type(wide, 1920, 1080, cfg) == "wide"
+    assert shot_type(closeup, 1920, 1080, cfg) == "closeup"
+    assert shot_type(crowd, 1920, 1080, cfg) == "no_pitch"
+
+
+def test_outside_share_flags_touchline_staff():
+    cfg = Config()
+    linesman = np.c_[np.linspace(-30, 0, 50), np.full(50, -35.5)]  # runs 1.5 m outside the touchline
+    winger = np.c_[np.linspace(-30, 0, 50), np.full(50, -33.5)]  # on the pitch, near the line
+    assert outside_share(linesman, cfg) > 0.9
+    assert outside_share(winger, cfg) == 0.0
+
+
+def test_assistant_referee_vs_referee():
+    def ident(pid, y):
+        tl = Tracklet(pid, np.arange(20), np.c_[np.linspace(-20, 0, 20), np.full(20, y)], np.zeros((20, 2, 2)),
+                      np.ones(20), np.zeros(20, int))
+        return Identity(pid, -1, "referee", [tl])
+    ref, lines = ident(1, 3.0), ident(2, -34.3)
+    mark_assistant_referees([ref, lines], Config())
+    assert ref.role == "referee" and lines.role == "assistant_referee"
+
+
+def test_vote_number_needs_agreement():
+    assert vote_number([(17, 0.9), (17, 0.8), (12, 0.7)]) == (17, 2)
+    assert vote_number([(17, 0.9)])[0] is None  # a single reading is not enough
+    assert vote_number([(7, 0.9), (7, 0.9)])[0] is None  # one digit needs 3 votes (could be half of 17)
+    assert vote_number([(7, 0.9)] * 3)[0] == 7
+
+
+def _tl(tid, f0, f1):
+    fr = np.arange(f0, f1)
+    return Tracklet(tid, fr, np.zeros((len(fr), 2)), np.zeros((len(fr), 2, 2)), np.ones(len(fr)), np.zeros(len(fr), int))
+
+
+def test_merge_by_number():
+    a = Identity(1, 0, "player", [_tl(1, 0, 50)], number=17, number_votes=3)
+    b = Identity(2, 0, "player", [_tl(2, 300, 350)], number=17, number_votes=2)  # later: same player
+    c = Identity(3, 0, "player", [_tl(3, 10, 40)], number=17, number_votes=1)  # same time as a: misread
+    d = Identity(4, 1, "player", [_tl(4, 300, 350)], number=17, number_votes=2)  # other team keeps its 17
+    out = merge_by_number([a, b, c, d])
+    ids = {i.pid: i for i in out}
+    assert set(ids) == {1, 3, 4}
+    assert len(ids[1].tracklets) == 2 and ids[3].number is None and ids[4].number == 17
+
+
+def test_referee_fragments_merge():
+    a = Identity(1, -1, "referee", [_tl(1, 0, 50)])
+    b = Identity(2, -1, "referee", [_tl(2, 60, 90)])
+    c = Identity(3, -1, "referee", [_tl(3, 40, 70)])  # overlaps both: a different person
+    out = merge_unique_roles([a, b, c])
+    assert {i.pid for i in out} == {1, 3} and len(out[0].tracklets) == 2
+
+
+def test_kit_colours_are_distinct():
+    red, dark = kit_display_colors([np.array([60, 60, 170]), np.array([40, 35, 30])])
+    assert red[2] > 180 and max(dark) < 80  # saturated red vs near-black
+    same = kit_display_colors([np.array([60, 60, 170]), np.array([65, 55, 175])])
+    assert np.linalg.norm(np.subtract(same[0], same[1])) > 90  # falls back to distinguishable colours
+
+
+def test_ball_trajectory_ignores_false_positives():
+    """True ball: weak detections (0.05-0.1) moving 10 m/s; false positives: stronger but
+    isolated and jumping around. The trajectory must follow the true ball."""
+    rng = np.random.default_rng(0)
+    cam = look_at([0.0, -50.0, 15.0], [-10.0, 0.0, 0.0], 2400.0)
+    fps, n = 25.0, 100
+    frames, truth = [], []
+    for k in range(n):
+        p = np.array([-25.0 + 10.0 * k / fps, -5.0 + 2.0 * k / fps])
+        truth.append(p)
+        boxes, scores = [], []
+        if rng.random() < 0.7:  # the ball is missed 30 % of the time
+            (u, v), = cam.project(np.array([[*p, 0.11]]))[0]
+            s = cam.pixel_height(p[None], 0.22)[0]
+            boxes.append([u - s / 2, v - s / 2, u + s / 2, v + s / 2])
+            scores.append(rng.uniform(0.05, 0.1))
+        if rng.random() < 0.4:  # a random false positive somewhere on the pitch
+            q = rng.uniform([-40, -25], [20, 25])
+            (u, v), = cam.project(np.array([[*q, 0.11]]))[0]
+            s = cam.pixel_height(q[None], 0.22)[0]
+            boxes.append([u - s / 2, v - s / 2, u + s / 2, v + s / 2])
+            scores.append(rng.uniform(0.1, 0.3))
+        frames.append(_fd(boxes, scores, [BALL] * len(scores), t=k / fps))
+    an = Analysis("synthetic", fps, cam.width, cam.height, n, {"stride_used": 1}, frames)
+    pos, det = track_ball(an, [cam] * n)
+    truth = np.array(truth)
+    ok = np.isfinite(pos).all(1)
+    err = np.linalg.norm(pos[ok] - truth[ok], axis=1)
+    assert ok.mean() > 0.8  # detected or interpolated most of the time
+    assert np.median(err) < 0.3 and (err > 3).mean() < 0.05  # and it is the real ball

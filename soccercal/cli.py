@@ -83,6 +83,15 @@ def _doctor(args) -> int:
         return "detector de jugadores cargado"
 
     step("Detector de jugadores (descarga yolo11m.pt la 1ª vez)", yolo_run)
+
+    def ocr_check():
+        from .jersey import JerseyReader
+
+        if not JerseyReader().available:
+            raise RuntimeError("falta rapidocr_onnxruntime: pip install rapidocr_onnxruntime (sin él no se leen dorsales)")
+        return "lector de dorsales disponible"
+
+    step("Lectura de dorsales (OCR)", ocr_check)
     print("\nTodo listo." if ok else "\nHay pasos con FALLO: copia el mensaje de error para diagnosticarlo.")
     return 0 if ok else 1
 
@@ -102,7 +111,7 @@ def _track(args) -> int:
     cfg = Config(device=args.device, start_s=args.start, max_seconds=args.max_seconds, stride=args.stride,
                  keyframe_every=args.keyframe_every, det_model=args.model, batch=args.batch,
                  home_name=args.home_name, away_name=args.away_name, extrapolate=not args.no_extrapolate,
-                 period=args.period, time_offset_s=args.time_offset)
+                 period=args.period, time_offset_s=args.time_offset, jersey_ocr=not args.no_jersey)
     t = time.time()
     res = run(args.video, args.out, cfg, render=not args.no_render, reuse_analysis=not args.redo)
     print(json.dumps(res.summary(), indent=2, ensure_ascii=False))
@@ -155,7 +164,9 @@ def main(argv=None) -> int:
     p.add_argument("-o", "--out", default="salida")
     p.add_argument("--start", type=float, default=0.0, help="segundo de inicio")
     p.add_argument("--max-seconds", type=float, default=None, help="procesar solo N segundos")
-    p.add_argument("--stride", type=int, default=1, help="analizar 1 de cada N fotogramas (2 = el doble de rápido)")
+    p.add_argument("--stride", type=int, default=None,
+                   help="analizar 1 de cada N fotogramas (por defecto automático: ~25 por segundo)")
+    p.add_argument("--no-jersey", action="store_true", help="no leer dorsales (un poco más rápido)")
     p.add_argument("--keyframe-every", type=int, default=5)
     p.add_argument("--model", default="yolo11m.pt", help="yolo11s.pt = más rápido, yolo11x.pt = más preciso")
     p.add_argument("--batch", type=int, default=8)

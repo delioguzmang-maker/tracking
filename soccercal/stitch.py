@@ -35,6 +35,9 @@ class Tracklet:
     desc: np.ndarray | None = None  # mean jersey descriptor (unit)
     team: int = OTHER
     team_conf: float = 0.0
+    outside: float = 0.0  # share of positions outside the lines (staff-like when high)
+    jersey_reads: list = field(default_factory=list)  # [(number, confidence)] from OCR
+    number: int | None = None  # voted shirt number
     # filled by ``endpoints``
     p0: np.ndarray = field(default_factory=lambda: np.zeros(2))
     v0: np.ndarray = field(default_factory=lambda: np.zeros(2))
@@ -126,6 +129,11 @@ def link_cost(a: Tracklet, b: Tracklet, fps: float, cfg: StitchConfig, motion: T
     if a.team != OTHER and b.team != OTHER and a.team != b.team and \
             min(a.team_conf, b.team_conf) >= cfg.min_team_conf:
         return np.inf
+    if (a.outside >= 0.6 and b.outside <= 0.2) or (b.outside >= 0.6 and a.outside <= 0.2):
+        return np.inf  # a touchline official / coach never becomes a player
+    same_number = a.number is not None and a.number == b.number
+    if a.number is not None and b.number is not None and not same_number:
+        return np.inf  # two different shirt numbers: two different players
     h = min(dt, cfg.horizon)
     drift = np.zeros(2)
     if motion is not None and dt > cfg.horizon:
@@ -138,6 +146,8 @@ def link_cost(a: Tracklet, b: Tracklet, fps: float, cfg: StitchConfig, motion: T
     err = 0.5 * (np.linalg.norm(pred_a - b.p0) + np.linalg.norm(pred_b - a.p1))
     scale = cfg.slack + cfg.sigma_v * dt
     c = err / scale
+    if same_number:
+        c *= 0.3  # the shirt number says it is the same player
     if a.desc is not None and b.desc is not None:
         c += cfg.app_weight * float(1.0 - np.clip(a.desc @ b.desc, 0, 1))
     return float(c)

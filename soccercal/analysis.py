@@ -17,8 +17,9 @@ import numpy as np
 
 from .camtrack import Registrar, Registration, frame_signature, grass_fraction, signature_distance
 from .config import Config
-from .detect import DESC_DIM, BALL, PERSON, Detections, PlayerDetector, grass_reference, jersey_descriptor
+from .detect import DESC_DIM, BALL, PERSON, Detections, PlayerDetector, ball_colour, grass_reference, jersey_descriptor
 from .field_model import FieldDetector, FieldObservation
+from .jersey import JerseyReader
 from .lines import LineMask
 
 
@@ -34,6 +35,9 @@ class FrameData:
     color: np.ndarray  # (n_person, 3) uint8 mean shirt BGR
     field: FieldObservation | None = None  # pitch keypoints (keyframes only)
     lines: tuple | None = None  # packed LineMask (keyframes only)
+    jersey: dict | None = None  # {person detection index: (shirt number, confidence)} (keyframes only)
+    shot: str = "unknown"  # set by cameras.solve_cameras: "wide", "closeup" or "no_pitch"
+    ball_sv: np.ndarray | None = None  # (n_ball, 2) colour of each ball candidate (saturation, brightness)
 
     @property
     def keyframe(self) -> bool:
@@ -51,8 +55,17 @@ class Analysis:
     frames: list[FrameData] = field(default_factory=list)
 
     @property
+    def stride(self) -> int:
+        return int(self.config.get("stride_used") or self.config.get("stride") or 1)
+
+    @property
     def proc_fps(self) -> float:
-        return self.fps / self.config.get("stride", 1)
+        """Analysed frames per second (from the real timestamps: robust to variable frame rate)."""
+        if len(self.frames) > 2:
+            dt = np.median(np.diff([f.t for f in self.frames]))
+            if dt > 0:
+                return float(1.0 / dt)
+        return self.fps / self.stride
 
     def save(self, path: str | Path) -> None:
         with gzip.open(path, "wb", compresslevel=3) as f:
@@ -76,11 +89,20 @@ def _person_features(frame: np.ndarray, det: Detections, grass_bgr: np.ndarray):
         h, w = y2 - y1, x2 - x1
         crop = frame[max(0, y1 + int(0.15 * h)):max(0, y1 + int(0.5 * h)), max(0, x1 + int(0.2 * w)):max(0, x2 - int(0.2 * w))]
         if crop.size:
-            color[i] = np.median(crop.reshape(-1, 3), 0).astype(np.uint8)
+            px = crop.reshape(-1, 3)
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV).reshape(-1, 3)
+            shirt = ~((hsv[:, 0] > 30) & (hsv[:, 0] < 90) & (hsv[:, 1] > 60))  # drop grass pixels
+            color[i] = np.median(px[shirt] if shirt.sum() >= 5 else px, 0).astype(np.uint8)
     return desc, color
 
 
-def iter_frames(path: str, start_s: float, stride: int, max_frames: int | None):
+def auto_stride(fps: float, target: float = 25.0) -> int:
+    return max(1, int(round(fps / target)))
+
+
+def iter_frames(path: str, start_s: float, stride: int, max_frames: int | None, with_time: bool = False):
+    """Yields (frame index, frame) — or (index, seconds, frame) with ``with_time``. The time is
+    the container timestamp, correct for variable-frame-rate files (phone / screen recordings)."""
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise FileNotFoundError(f"No se puede abrir el vídeo: {path}")
@@ -90,12 +112,17 @@ def iter_frames(path: str, start_s: float, stride: int, max_frames: int | None):
         cap.set(cv2.CAP_PROP_POS_FRAMES, start)
     idx = start
     n = 0
+    last_t = None
     while True:
         ok, fr = cap.read()
         if not ok:
             break
+        t = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+        if not np.isfinite(t) or (last_t is not None and t <= last_t) or (t == 0 and idx > 0):
+            t = idx / fps if last_t is None else max(idx / fps, last_t + 1e-3)
+        last_t = t
         if (idx - start) % stride == 0:
-            yield idx, fr
+            yield (idx, t, fr) if with_time else (idx, fr)
             n += 1
             if max_frames is not None and n >= max_frames:
                 break
@@ -113,15 +140,20 @@ def analyze(video: str | Path, cfg: Config | None = None, progress: bool = True,
     W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
+    stride = cfg.stride or auto_stride(fps)
     max_frames = None
     if cfg.max_seconds is not None:
-        max_frames = int(np.ceil(cfg.max_seconds * fps / cfg.stride))
-    n_expected = (max_frames or int(np.ceil(max(0, n_total - cfg.start_s * fps) / cfg.stride)))
+        max_frames = int(np.ceil(cfg.max_seconds * fps / stride))
+    n_expected = (max_frames or int(np.ceil(max(0, n_total - cfg.start_s * fps) / stride)))
 
-    detector = detector or PlayerDetector(cfg.det_model, cfg.device, cfg.det_imgsz, cfg.det_conf)
+    detector = detector or PlayerDetector(cfg.det_model, cfg.device, cfg.det_imgsz, cfg.det_conf,
+                                          ball_conf=cfg.ball_conf)
     field_detector = field_detector or FieldDetector(cfg.device)
+    jersey = JerseyReader(max_crops=cfg.jersey_crops) if cfg.jersey_ocr else None
     reg = Registrar(W, H)
     out = Analysis(str(video), fps, W, H, n_total, cfg.to_dict())
+    out.config["stride_used"] = stride
+    out.config["jersey_ocr_available"] = bool(jersey and jersey.available)
 
     bar = None
     if progress:
@@ -137,10 +169,10 @@ def analyze(video: str | Path, cfg: Config | None = None, progress: bool = True,
 
     def flush(buf):
         nonlocal prev_sig, since_key
-        frames = [fr for _, fr in buf]
+        frames = [fr for _, _, fr in buf]
         dets = detector(frames)
         recs, is_key = [], []
-        for (idx, fr), det in zip(buf, dets):
+        for (idx, t, fr), det in zip(buf, dets):
             sig = frame_signature(fr)
             sd = 1.0 if prev_sig is None else signature_distance(prev_sig, sig)
             prev_sig = sig
@@ -151,20 +183,24 @@ def analyze(video: str | Path, cfg: Config | None = None, progress: bool = True,
             since_key = 0 if key else since_key + 1
             g = grass_reference(fr)
             desc, color = _person_features(fr, det, g)
-            recs.append(FrameData(idx, idx / fps, sd, grass_fraction(fr), r, det, desc, color))
+            recs.append(FrameData(idx, t, sd, grass_fraction(fr), r, det, desc, color))
+            recs[-1].ball_sv = ball_colour(fr, det.balls().boxes)
             is_key.append(key)
         keys = [i for i, k in enumerate(is_key) if k]
         if keys:
             obs = field_detector([frames[i] for i in keys])
             for i, o in zip(keys, obs):
                 recs[i].field = o
-                recs[i].lines = LineMask.from_frame(frames[i], dets[i].persons().boxes).pack()
+                p = dets[i].persons()
+                recs[i].lines = LineMask.from_frame(frames[i], p.boxes).pack()
+                if jersey is not None and jersey.available and len(o.keypoints) >= 4:  # only on pitch views
+                    recs[i].jersey = jersey.read(frames[i], p.boxes, p.scores)
         out.frames.extend(recs)
         if bar is not None:
             bar.update(len(recs))
 
-    for idx, fr in iter_frames(video, cfg.start_s, cfg.stride, max_frames):
-        buf.append((idx, fr))
+    for idx, t, fr in iter_frames(video, cfg.start_s, stride, max_frames, with_time=True):
+        buf.append((idx, t, fr))
         if len(buf) >= cfg.batch:
             flush(buf)
             buf = []

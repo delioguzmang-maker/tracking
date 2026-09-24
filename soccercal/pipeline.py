@@ -46,7 +46,8 @@ class Result:
         n = len(self.cameras)
         valid = sum(c is not None for c in self.cameras)
         ids = self.tracking.identities
-        per_team = {t: sum(1 for i in ids if i.team == t and i.role != "referee") for t in (0, 1)}
+        per_team = {t: sum(1 for i in ids if i.team == t and i.role in ("player", "goalkeeper")) for t in (0, 1)}
+        shots = [getattr(fd, "shot", "unknown") for fd in self.analysis.frames]
         aligns = [c.info["align"] for c in self.cameras if c is not None and c.info.get("align") is not None]
         return {
             "frames_analysed": n,
@@ -57,7 +58,11 @@ class Result:
             "identities_team_A": per_team[0],
             "identities_team_B": per_team[1],
             "referees": sum(1 for i in ids if i.role == "referee"),
+            "assistant_referees": sum(1 for i in ids if i.role == "assistant_referee"),
+            "staff_off_pitch": sum(1 for i in ids if i.role == "staff"),
             "goalkeepers": sum(1 for i in ids if i.role == "goalkeeper"),
+            "shirt_numbers_read": sum(1 for i in ids if i.number is not None and i.role in ("player", "goalkeeper")),
+            "pct_frames_closeup_or_crowd": round(100.0 * sum(s in ("closeup", "no_pitch") for s in shots) / max(n, 1), 1),
             "output_frames": int(len(self.out_t)),
             "pct_player_rows_detected": round(100.0 * float(self.table["is_detected"].mean()), 1) if len(self.table) else 0.0,
             "ball_detected_pct": round(100.0 * float(self.ball_det[[c is not None for c in self.cameras]].mean()), 1) if valid else 0.0,
@@ -127,18 +132,21 @@ def build(an: Analysis, cfg: Config | None = None) -> Result:
                 ok[k] = False
         sp = speeds(out_t, np.where(ok[:, None], s.pos, np.nan))
         team = "A" if ident.team == 0 else "B" if ident.team == 1 else "other"
+        num = ident.number if ident.number is not None else -1
         for k in np.nonzero(ok)[0]:
-            rows.append((k, out_t[k], ident.pid, team, ident.role, s.pos[k, 0], s.pos[k, 1], bool(s.detected[k]), sp[k]))
-    table = pd.DataFrame(rows, columns=["frame", "t", "player_id", "team", "role", "x", "y", "is_detected", "speed_ms"])
+            rows.append((k, out_t[k], ident.pid, num, team, ident.role, s.pos[k, 0], s.pos[k, 1], bool(s.detected[k]), sp[k]))
+    table = pd.DataFrame(rows, columns=["frame", "t", "player_id", "shirt_number", "team", "role", "x", "y", "is_detected",
+                                       "speed_ms"])
     if len(table):
         table["timestamp"] = table["t"] - t_first + cfg.time_offset_s
         table["speed_kmh"] = table["speed_ms"] * 3.6
-    phys = physical_summary(table[table["role"] != "referee"]) if len(table) else pd.DataFrame()
+    phys = physical_summary(table[table["role"].isin(["player", "goalkeeper"])]) if len(table) else pd.DataFrame()
     return Result(an, cfg, cams, segs, trk, ball_pos, ball_det, out_t, table, phys, tim)
 
 
 # settings that change what the slow pass computes (everything else is re-done in seconds)
-PASS1_KEYS = ("start_s", "max_seconds", "stride", "keyframe_every", "det_model", "det_imgsz", "det_conf", "cut_threshold")
+PASS1_KEYS = ("start_s", "max_seconds", "stride", "keyframe_every", "det_model", "det_imgsz", "det_conf", "ball_conf",
+              "jersey_ocr", "jersey_crops", "cut_threshold")
 
 
 def _in_view(cam, xy, margin: float = 0.02) -> bool:

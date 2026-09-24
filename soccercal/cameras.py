@@ -31,6 +31,23 @@ class Segment:
     n_good_keys: int = 0
 
 
+def shot_type(fd, width: int, height: int, cfg: Config) -> str:
+    """'wide' (usable for tracking) or why not: 'closeup' (a person fills the image: a player,
+    the coach, a fan) or 'no_pitch' (crowd, bench, graphics: little grass).
+
+    SkillCorner-style data only comes from wide views of the pitch; everything else must not
+    produce positions even if a calibration happened to succeed on it."""
+    if fd.grass < cfg.min_grass:
+        return "no_pitch"
+    p = fd.det.persons()
+    if len(p):
+        h = (p.boxes[:, 3] - p.boxes[:, 1]) / height
+        big = (h > cfg.closeup_person_frac) & (p.scores > 0.4)
+        if big.any():
+            return "closeup"
+    return "wide"
+
+
 def split_segments(an: Analysis, cfg: Config) -> list[Segment]:
     segs, s = [], 0
     for i in range(1, len(an.frames)):
@@ -48,6 +65,7 @@ def solve_cameras(an: Analysis, cfg: Config | None = None, progress: bool = Fals
     n = len(an.frames)
     cams: list[Camera | None] = [None] * n
     segs = split_segments(an, cfg)
+    shots = [shot_type(fd, an.width, an.height, cfg) for fd in an.frames]
     masks: dict[int, LineMask] = {}
 
     def mask(i):
@@ -58,7 +76,7 @@ def solve_cameras(an: Analysis, cfg: Config | None = None, progress: bool = Fals
     # --- free calibrations
     free: dict[int, Camera] = {}
     for i, fd in enumerate(an.frames):
-        if fd.field is None or len(fd.field.keypoints) < 4:
+        if fd.field is None or len(fd.field.keypoints) < 4 or shots[i] != "wide":
             continue
         c = calibrate(fd.field, line_mask=mask(i))
         if quality_ok(c, min_align=cfg.min_align):
@@ -90,7 +108,7 @@ def solve_cameras(an: Analysis, cfg: Config | None = None, progress: bool = Fals
         keys, wts = {}, {}
         for i in range(sg.start, sg.end):
             fd = an.frames[i]
-            if fd.field is None:
+            if fd.field is None or shots[i] != "wide":
                 continue
             c = calibrate(fd.field, line_mask=mask(i), fix_center=sg.center, prior=free.get(i))
             if quality_ok(c, min_align=cfg.min_align):
@@ -111,8 +129,10 @@ def solve_cameras(an: Analysis, cfg: Config | None = None, progress: bool = Fals
         for k in range(L):
             gap = np.min(np.abs(kidx - k))
             c = fused[k]
-            if gap <= max_gap and c.is_plausible():
+            if gap <= max_gap and c.is_plausible() and shots[sg.start + k] == "wide":
                 c.info = {"segment": segs.index(sg), "keyframe_gap": int(gap), "main": sg.main_camera,
                           "align": keys[k].info.get("align") if k in keys else None}
                 cams[sg.start + k] = c
+    for i, s in enumerate(shots):
+        an.frames[i].shot = s  # kept for the verification video / summary
     return cams, segs

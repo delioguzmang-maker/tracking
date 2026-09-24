@@ -25,7 +25,7 @@ que hace falta para llegar a datos de tracking.
 |---|---|
 | `1_tracking_extrapolated.jsonl` | **formato SkillCorner**: un fotograma cada 0,1 s con `player_data` (x, y, player_id, is_detected), `ball_data`, `possession`, `image_corners_projection` |
 | `1_match.json` | **formato SkillCorner**: equipos, color de camiseta estimado, plantilla (identidades), portero, tamaño del campo |
-| `tracking.csv` | lo mismo en tabla: `frame, timestamp, player_id, team, role, x, y, is_detected, speed_kmh` |
+| `tracking.csv` | lo mismo en tabla: `frame, timestamp, player_id, shirt_number, team, role, x, y, is_detected, speed_kmh` |
 | `physical.csv` | por jugador: distancia total y por bandas (andar, trotar, correr, HSR 20–25 km/h, sprint >25), velocidad máxima, PSV-99, nº de esfuerzos |
 | `cameras.csv` | la cámara en cada fotograma: pan, inclinación, zoom, posición, calidad |
 | `verificacion.mp4` | **el control de calidad**: el campo dibujado sobre la imagen + cada jugador con su identidad + minimapa |
@@ -34,6 +34,23 @@ que hace falta para llegar a datos de tracking.
 
 Coordenadas como SkillCorner: metros, origen en el centro del campo, `x` a lo largo (positivo hacia la
 derecha vista desde la cámara principal), `y` a lo ancho (positivo hacia la banda lejana).
+
+### Cómo leer el vídeo de verificación
+
+| lo que ves | significa |
+|---|---|
+| líneas magenta | el campo dibujado con la cámara calculada: deben caer encima de las líneas reales |
+| `#17` | dorsal **leído en la camiseta** (OCR, votado sobre muchas lecturas) |
+| `id12` | jugador cuyo dorsal todavía no se ha podido leer: es un número interno de seguimiento, **no** el dorsal |
+| `GK`, `ARB`, `JL` | portero, árbitro, juez de línea (árbitros y jueces de línea no salen en los datos de jugadores) |
+| sin caja | entrenadores, suplentes, recogepelotas y público: se detectan pero **no** son jugadores |
+| círculo amarillo | balón detectado |
+| aviso "PLANO DESCARTADO" | primer plano de un jugador/entrenador, público, banquillo, gráficos: ese tramo **no genera datos** |
+
+Reglas (como SkillCorner): solo se usan planos abiertos de la cámara principal; un plano con una persona
+que ocupa más del 40 % de la altura de la imagen, o con poco césped, se descarta. Una persona que pasa la
+mayor parte del tiempo fuera de las líneas (banda, banquillo) es *staff*, nunca jugador, y el seguimiento
+no puede unirla con un jugador.
 
 ![vídeo de verificación](docs/verificacion_ejemplo.jpg)
 
@@ -158,6 +175,8 @@ son estimaciones, no medidas en este repositorio. Más rápido: `--model yolo11s
 | los equipos salen al revés | `--home-name` / `--away-name` en el orden contrario (el "local" es el primer grupo de color) |
 | no se reproduce `verificacion.mp4` en el navegador | ábrelo con QuickTime o VLC (códec mp4v) |
 | quieres rehacer el análisis con otro modelo | añade `--redo` |
+| el balón se pierde a menudo | ver "El balón" más abajo: con un detector entrenado en fútbol mejora mucho |
+| salen etiquetas `id12` en vez de dorsales | normal cuando el dorsal no se ve (jugador de frente o lejos); con más minutos de vídeo se leen más |
 
 ---
 
@@ -197,6 +216,11 @@ a dos jugadores y no fusionar solo parte a uno.
 césped (corrige sombra/sol), agrupado en todo el vídeo; una equipación que se parte en dos grupos
 (sol y sombra) se sigue reconociendo como el mismo equipo. Portero: la persona de color distinto que
 vive junto a una portería; su equipo es el que tiene a sus defensas más cerca de esa portería.
+
+**Dorsales.** En cada fotograma clave se leen las espaldas de los 3 jugadores más grandes con un modelo
+OCR que viene dentro del paquete (sin descargas). Cada identidad vota con todas sus lecturas (un dígito
+necesita 3 votos, porque "7" suele ser medio "17"); dos fragmentos del mismo equipo y dorsal que nunca
+coinciden en pantalla se unen, y dorsales distintos impiden unir.
 
 **Salida tipo SkillCorner.** Remuestreo a 10 fps; huecos cortos con curva de Hermite; jugadores
 fuera de plano movidos con su equipo (`is_detected: false`); una posición extrapolada que la cámara
@@ -241,6 +265,15 @@ El mismo banco sirvió para corregir el diseño: la primera versión (enlace vor
 movimiento del equipo) asignaba mal el 6 % de las observaciones; la actual, el 0,3 %. La
 extrapolación siguiendo al equipo bajó el error fuera de cámara de 6,1 m a 3,8 m.
 
+**Balón** (clip de 1080p, 153 fotogramas): se conoce su posición en el **77 %** de los fotogramas de
+salida (33 % detectado directamente; el resto interpolado entre detecciones o en los pies del jugador
+que lo lleva). En una muestra de 17 posiciones elegidas, las 17 eran el balón real. Antes de los filtros
+nuevos, en un clip del Bayern–PSG el "balón" elegido era casi siempre la bota flúor de un jugador.
+
+**Personas que no son jugadores** (clip Bayern–PSG de 15 s): el plano del público del inicio se
+descarta entero; juez de línea, entrenador y árbitro quedan fuera de los datos de jugadores; dorsales
+leídos: #17 (20 lecturas) y #27 del Bayern.
+
 Formato verificado: `tests/test_export.py` carga la salida con kloppy, y el visor oficial
 `SkillCorner_Tracking_Viewer.html` la abre sin errores (probado en Chromium: 26 identidades, 61 fotogramas, 10 Hz, portero y posesión).
 
@@ -254,11 +287,20 @@ no son la cámara principal.
 
 Diferente / pendiente:
 
-* **Identidades anónimas.** SkillCorner conoce la alineación y reconoce dorsales (y revisa a mano:
-  anuncian ~97 % de identidades correctas). Aquí un jugador que sale mucho rato de plano puede volver
-  con otro número: en un partido habrá más identidades que jugadores. No se leen dorsales.
-* **Balón en el aire:** se proyecta al suelo; la altura (`z`) no se estima. El detector de balón es el
-  genérico de COCO: se pierde en pases largos y balones bombeados.
+* **Identidades y dorsales.** SkillCorner conoce la alineación, reconoce dorsales y revisa a mano
+  (anuncian ~97 % de identidades correctas). Aquí los dorsales se leen con OCR cuando la espalda del
+  jugador es visible y está cerca de la cámara (en el clip de prueba a 720p: 2 de ~20 jugadores en 15 s;
+  en un partido completo y a 1080p se leen muchos más). Un jugador sin dorsal leído que sale mucho rato
+  de plano puede volver con otro `id`: habrá más identidades que jugadores. Con dorsal, los fragmentos se
+  unen automáticamente.
+* **El balón.** El detector genérico (COCO) ve el balón con poca confianza y confunde botas blancas o
+  flúor, cabezas y letras de las vallas. Por eso: se guardan también las detecciones débiles, se exige
+  que el candidato esté en el césped, tenga el tamaño de un balón de 22 cm a esa distancia, no esté
+  sobre un jugador y no sea de un color saturado, y se elige la trayectoria que se mueve como un balón
+  (las botas y los falsos positivos saltan). Cuando el balón no se ve pero un jugador lo tiene, se sitúa
+  en sus pies (`is_detected: false`). La altura (`z`) no se estima. **Para mejorarlo de verdad** usa un
+  detector entrenado en fútbol: `--model ruta/a/modelo_futbol.pt` (cualquier modelo Ultralytics cuyas
+  clases se llamen `player`, `goalkeeper`, `referee`, `ball`; se reconocen automáticamente).
 * **Repeticiones a cámara lenta desde la cámara principal:** no se detectan (las de otras cámaras sí
   se descartan porque la cámara está en otra posición).
 * **Distorsión de lente:** se asume cero (correcto en la cámara principal; no en objetivos gran
@@ -270,7 +312,7 @@ Diferente / pendiente:
 ## Para desarrolladores
 
 ```bash
-pytest -q                                  # 27 pruebas, ~30 s, no necesitan pesos
+pytest -q                                  # 35 pruebas, ~30 s, no necesitan pesos
 python tools/synthetic_benchmark.py        # seguimiento con verdad conocida
 python tools/calibration_benchmark.py      # calibración en el clip real
 python tools/make_notebooks.py             # regenera los cuadernos
