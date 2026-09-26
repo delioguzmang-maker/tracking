@@ -6,7 +6,9 @@ white boots, heads and advertising letters often score higher. So:
 1. keep every weak "sports ball" candidate (``Config.ball_conf``);
 2. geometric filters that only a calibrated camera allows: the candidate must be
    on the pitch, its size must match a 22 cm ball at that distance, it must not sit
-   on a player's head or shirt, and it must not be strongly coloured (neon boots);
+   on a player's head or shirt, it must not be strongly coloured (neon boots), and it
+   must have grass above it (white dots on the advertising boards just behind the far
+   touchline project onto the pitch too);
 3. candidates are chained into constant-velocity tracklets (a real ball moves
    smoothly; false positives jump around), and the non-overlapping set of tracklets
    with the most evidence is chosen, each paying a price for starting, so isolated
@@ -64,6 +66,8 @@ def candidates(fd, cam, ball_conf: float = 0.03):
     sv = getattr(fd, "ball_sv", None)
     if sv is not None and len(sv) == len(sc):
         ok &= sv[:, 0] <= 110  # a ball is (mostly) white: very saturated blobs are boots, logos, bibs
+        if sv.shape[1] >= 3:  # grass above it (advertising boards and the crowd have none)
+            ok &= at_feet | (sv[:, 2] >= 0.35 * 255)
     if ok.any():
         d = np.min(np.linalg.norm(np.nan_to_num(xy, nan=1e6)[:, None] - _SPOTS[None], axis=2), 1)
         w[d < 0.5] *= 0.5  # painted spots look like a ball
@@ -170,3 +174,77 @@ def track_ball(an: Analysis, cams: list, ball_conf: float = 0.03, vmax: float = 
             s = ((t[a + 1:b] - t[a]) / (t[b] - t[a]))[:, None]
             pos[a + 1:b] = pos[a] * (1 - s) + pos[b] * s
     return pos, det
+
+
+def ball_timeline(frame_t: np.ndarray, near: np.ndarray, valid: np.ndarray, ball_pos: np.ndarray, ball_det: np.ndarray,
+                  out_t: np.ndarray, players: dict, team_of: dict, fps_an: float, carry_s: float = 2.0,
+                  back_s: float = 1.5, keep_poss_s: float = 3.0, poss_dist: float = 1.5):
+    """The ball on the output grid, with possession. Returns a DataFrame (one row per output
+    frame): x, y, is_detected, kind ('detected' / 'interpolated' / 'carried' / ''), possession
+    player and team.
+
+    Where the ball is not seen, the player who has it carries it: for up to ``carry_s`` after
+    it was last seen at his feet, and up to ``back_s`` before it is first seen at the feet of a
+    player who then keeps it (dribbling out of a crowd). ``players``: {output frame: (pids,
+    (n,2) positions)}."""
+    import pandas as pd
+
+    n = len(out_t)
+    bx = np.interp(out_t, frame_t, ball_pos[:, 0])  # NaN propagates: unknown stays unknown
+    by = np.interp(out_t, frame_t, ball_pos[:, 1])
+    seen = ball_det[near] & (np.abs(frame_t[near] - out_t) <= 0.5 / fps_an + 1e-6) & valid
+    known = np.isfinite(bx) & np.isfinite(by) & valid
+    kind = np.where(known & seen, "detected", np.where(known, "interpolated", "")).astype(object)
+
+    def at(k, pid):
+        pids, P = players.get(k, ([], np.zeros((0, 2))))
+        for q, p in zip(pids, P):
+            if q == pid:
+                return p
+        return None
+
+    def holder(k):
+        pids, P = players.get(k, ([], np.zeros((0, 2))))
+        if not len(pids):
+            return None
+        d = np.hypot(P[:, 0] - bx[k], P[:, 1] - by[k])
+        j = int(np.argmin(d))
+        return pids[j] if d[j] < poss_dist else None
+
+    poss = [None] * n
+    pid, last_seen, cand, cand_n = None, -1e9, None, 0
+    for k in range(n):  # forward: possession with hysteresis (a new holder must keep it 0.3 s)
+        if kind[k] == "detected":
+            h = holder(k)
+            if h is not None:
+                cand_n = cand_n + 1 if h == cand else 1
+                cand = h
+                if h == pid or cand_n >= 3 or pid is None:
+                    pid = h
+                if h == pid:
+                    last_seen = out_t[k]
+        if out_t[k] - last_seen > keep_poss_s:
+            pid = None
+        poss[k] = pid
+        if valid[k] and not kind[k] and pid is not None and out_t[k] - last_seen <= carry_s:
+            p = at(k, pid)
+            if p is not None:
+                bx[k], by[k], kind[k] = p[0], p[1], "carried"
+    first = None  # backward: before the ball reappears at the feet of the player who keeps it
+    for k in range(n - 1, -1, -1):
+        if kind[k] == "detected":
+            h = holder(k)
+            first = (h, out_t[k]) if h is not None and poss[k] == h else None
+        elif not kind[k] and valid[k] and first is not None and first[1] - out_t[k] <= back_s:
+            p = at(k, first[0])
+            if p is not None:
+                bx[k], by[k], kind[k] = p[0], p[1], "carried"
+                poss[k] = first[0]
+    ok = kind != ""
+    return pd.DataFrame({
+        "frame": np.arange(n), "t": out_t,
+        "x": np.where(ok, bx, np.nan), "y": np.where(ok, by, np.nan),
+        "is_detected": kind == "detected", "kind": kind,
+        "possession_player_id": [p if p is not None else -1 for p in poss],
+        "possession_team": [team_of.get(p, -1) if p is not None else -1 for p in poss],
+    })

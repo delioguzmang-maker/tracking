@@ -21,8 +21,10 @@ class Config:
     det_imgsz: int = 1280
     det_conf: float = 0.10  # people
     ball_conf: float = 0.03  # the ball is tiny: keep weak candidates, the ball tracker filters them
+    ball_refine: bool = True  # second look for the ball in high resolution where it was not found
     jersey_ocr: bool = True  # read shirt numbers (bundled OCR model; needs rapidocr_onnxruntime)
     jersey_crops: int = 3  # players read per keyframe (the largest ones)
+    jersey_views: int = 80  # second look: best views of each player read over the whole clip
     # ----------------------------------------------------------- calibration
     cut_threshold: float = 0.30  # frame-signature distance that means a shot cut
     min_align: float = 0.35  # minimum line alignment to accept a calibration

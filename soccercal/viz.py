@@ -91,10 +91,13 @@ class PitchCanvas:
             else:
                 cv2.circle(img, c, 8, col, 2, cv2.LINE_AA)
             cv2.putText(img, str(pid), (c[0] + 9, c[1] - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
-        if ball is not None and np.isfinite(ball).all():
-            c = tuple(self.px([ball])[0])
-            cv2.circle(img, c, 6, (0, 220, 255), -1, cv2.LINE_AA)
-            cv2.circle(img, c, 6, (0, 0, 0), 1, cv2.LINE_AA)
+        if ball is not None and np.isfinite(ball[:2]).all():
+            c = tuple(self.px([ball[:2]])[0])
+            if len(ball) < 3 or ball[2]:  # seen
+                cv2.circle(img, c, 6, (0, 220, 255), -1, cv2.LINE_AA)
+                cv2.circle(img, c, 6, (0, 0, 0), 1, cv2.LINE_AA)
+            else:  # interpolated or carried by the player who has it
+                cv2.circle(img, c, 6, (0, 220, 255), 2, cv2.LINE_AA)
         return img
 
 
@@ -199,7 +202,10 @@ def render_video(res, path: str | Path, progress: bool = True, max_frames: int |
         fp = cam.footprint() if cam is not None else None
         if fp is not None:
             fp = np.clip(fp, [-cfg.pitch_length / 2 - 5, -cfg.pitch_width / 2 - 5], [cfg.pitch_length / 2 + 5, cfg.pitch_width / 2 + 5])
-        ball = res.ball_pos[i] if cam is not None and np.isfinite(res.ball_pos[i]).all() else None
+        ball = None
+        if cam is not None and res.ball_out is not None and k >= 0 and res.ball_out["kind"].iat[k]:
+            b = res.ball_out.iloc[k]
+            ball = np.array([b["x"], b["y"], float(b["is_detected"])])
         tr_draw = {pid: (np.array(tr)[:, 1:], team_color(ident[pid].team, colors)) for pid, tr in trails.items() if tr}
         mini = canvas.draw(players, ball, fp, tr_draw)
         cv2.putText(mini, f"t={fd.t:6.2f}s  frame {idx}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)

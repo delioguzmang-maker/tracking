@@ -96,7 +96,7 @@ def _person_features(frame: np.ndarray, det: Detections, grass_bgr: np.ndarray):
     return desc, color
 
 
-ANALYSIS_VERSION = 4  # bump when the first (neural network) pass changes what it stores
+ANALYSIS_VERSION = 5  # bump when the first (neural network) pass changes what it stores
 
 
 def auto_stride(fps: float, target: float = 25.0) -> int:

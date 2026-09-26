@@ -168,3 +168,41 @@ def test_real_fps_from_timestamps(tmp_path):
     assert abs(fps - 50.0) < 0.5 and auto_stride(fps) == 2
     t = [s for _, s, _ in iter_frames(path, 0.0, 2, None, with_time=True, fps=fps)]
     assert len(t) == 15 and np.allclose(np.diff(t), 0.04, atol=1e-3)
+
+
+def test_jersey_reader_reads_a_small_back_number():
+    """A 70 px tall player seen from behind at 720p: red shirt, white '17' ~14 px tall."""
+    from soccercal.jersey import JerseyReader
+    reader = JerseyReader()
+    if not reader.available:
+        import pytest
+        pytest.skip("rapidocr_onnxruntime not installed")
+    frame = np.full((200, 200, 3), (60, 140, 60), np.uint8)  # grass
+    box = np.array([80, 50, 110, 120], float)  # 30 x 70 px player
+    cv2 = __import__("cv2")
+    cv2.rectangle(frame, (80, 58), (110, 92), (40, 40, 200), -1)  # shirt
+    cv2.rectangle(frame, (84, 92), (106, 120), (40, 40, 200), -1)  # shorts / legs
+    cv2.putText(frame, "17", (83, 83), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (235, 235, 235), 2, cv2.LINE_AA)
+    frame = cv2.GaussianBlur(frame, (3, 3), 0.8)
+    r = reader.read_one(frame, box)
+    assert r is not None and r[0] == 17
+
+
+def test_ball_search_windows_follow_the_trajectory():
+    from soccercal.refine import ball_search_windows
+    cam = look_at([0.0, -50.0, 15.0], [0.0, 0.0, 0.0], 1500.0, W=1280, H=720)
+    n = 30
+    frames = [_fd([], [], [], t=k / 25.0) for k in range(n)]
+    an = Analysis("synthetic", 25.0, 1280, 720, n, {"stride_used": 1}, frames)
+    pos = np.full((n, 2), np.nan)
+    det = np.zeros(n, bool)
+    for k in (0, 1, 2, 20, 21):  # seen, lost for 17 frames, seen again
+        pos[k], det[k] = [-5.0 + 0.5 * k, 0.0], True
+    win = ball_search_windows(an, [cam] * n, pos, det, imgsz=1280)
+    ks = sorted(win)
+    assert set(ks) <= set(range(n)) - {0, 1, 2, 20, 21} and len(ks) >= 7
+    assert min(np.diff(ks)) >= 3  # about every 0.1 s (the tracker interpolates in between)
+    for k in ks:
+        uv, _ = cam.project(np.array([[-5.0 + 0.5 * k, 0.0, 0.11]]))
+        (x0, y0, x1, y1), = win[k]
+        assert x0 <= uv[0, 0] <= x1 and y0 <= uv[0, 1] <= y1 and x1 - x0 == int(1280 / 2.4)

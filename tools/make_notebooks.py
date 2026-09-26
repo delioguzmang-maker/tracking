@@ -208,6 +208,9 @@ print(VIDEO)
 | `start_s`, `max_seconds` | tramo a procesar (segundos) |
 | `stride` | `None` = automático (~25 fotogramas analizados por segundo); 2 = la mitad de eso |
 | `jersey_ocr` | leer dorsales (la etiqueta pasa de `id12` a `#17` cuando se lee con seguridad) |
+| `jersey_views` | vistas de cada jugador que se leen en la segunda mirada (80; menos = más rápido) |
+| `ball_refine` | segunda búsqueda del balón en alta resolución donde no se encontró (`True`) |
+| `players_per_team` | máximo de identidades por equipo (11 = 10 de campo + portero; `None` = sin límite) |
 | `det_model` | `yolo11m.pt` (equilibrado), `yolo11s.pt` (rápido), `yolo11x.pt` (preciso) |
 | `home_name`, `away_name` | nombres de los equipos (el "local" es el primer color detectado; revisa `summary.json`) |
 | `period`, `time_offset_s` | parte del partido y minuto de reloj del primer fotograma |

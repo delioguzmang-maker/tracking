@@ -139,8 +139,10 @@ def jersey_descriptor(frame_bgr: np.ndarray, box: np.ndarray, grass_bgr: np.ndar
 
 
 def ball_colour(frame: np.ndarray, boxes: np.ndarray) -> np.ndarray:
-    """(k, 2) uint8: median saturation and bright-pixel value of each ball candidate."""
-    out = np.zeros((len(boxes), 2), np.uint8)
+    """(k, 3) uint8 per ball candidate: median saturation, bright-pixel value, and the share of
+    grass (x255) in the upper half of a ring around it. A ball on the pitch has grass above
+    it (or a player's legs); a white dot on an advertising board or in the crowd does not."""
+    out = np.zeros((len(boxes), 3), np.uint8)
     H, W = frame.shape[:2]
     for i, (x1, y1, x2, y2) in enumerate(boxes):
         cx, cy, r = (x1 + x2) / 2, (y1 + y2) / 2, max(1.5, 0.3 * min(x2 - x1, y2 - y1))
@@ -148,5 +150,16 @@ def ball_colour(frame: np.ndarray, boxes: np.ndarray) -> np.ndarray:
         c, d = int(max(0, cy - r)), int(min(H, cy + r + 1))
         if b > a and d > c:
             hsv = cv2.cvtColor(frame[c:d, a:b], cv2.COLOR_BGR2HSV).reshape(-1, 3)
-            out[i] = (np.median(hsv[:, 1]), np.percentile(hsv[:, 2], 90))
+            out[i, :2] = (np.median(hsv[:, 1]), np.percentile(hsv[:, 2], 90))
+        s = max(x2 - x1, y2 - y1)
+        r_in, r_out = 0.7 * s, 1.6 * s + 3
+        a, b = int(max(0, cx - r_out)), int(min(W, cx + r_out + 1))
+        c, d = int(max(0, cy - r_out)), int(min(H, cy + 1))
+        if b > a and d > c:
+            yy, xx = np.mgrid[c:d, a:b]
+            rr = np.hypot(xx - cx, yy - cy)
+            m = (rr >= r_in) & (rr <= r_out)
+            hsv = cv2.cvtColor(frame[c:d, a:b], cv2.COLOR_BGR2HSV)
+            g = (hsv[..., 0] > 28) & (hsv[..., 0] < 95) & (hsv[..., 1] > 35) & (hsv[..., 2] > 25)
+            out[i, 2] = int(round(255 * g[m].mean())) if m.any() else 0
     return out

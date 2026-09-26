@@ -26,6 +26,7 @@ que hace falta para llegar a datos de tracking.
 | `1_tracking_extrapolated.jsonl` | **formato SkillCorner**: un fotograma cada 0,1 s con `player_data` (x, y, player_id, is_detected), `ball_data`, `possession`, `image_corners_projection` |
 | `1_match.json` | **formato SkillCorner**: equipos, color de camiseta estimado, plantilla (identidades), portero, tamaño del campo |
 | `tracking.csv` | lo mismo en tabla: `frame, timestamp, player_id, shirt_number, team, role, x, y, is_detected, speed_kmh` |
+| `ball.csv` | el balón a 10 fps: `x, y, is_detected, kind` (`detected` visto, `interpolated` entre dos detecciones, `carried` en los pies de quien lo lleva) y la posesión |
 | `physical.csv` | por jugador: distancia total y por bandas (andar, trotar, correr, HSR 20–25 km/h, sprint >25), velocidad máxima, PSV-99, nº de esfuerzos |
 | `cameras.csv` | la cámara en cada fotograma: pan, inclinación, zoom, posición, calidad |
 | `verificacion.mp4` | **el control de calidad**: el campo dibujado sobre la imagen + cada jugador con su identidad + minimapa |
@@ -44,7 +45,8 @@ derecha vista desde la cámara principal), `y` a lo ancho (positivo hacia la ban
 | `id12` | jugador cuyo dorsal todavía no se ha podido leer: es un número interno de seguimiento, **no** el dorsal |
 | `GK`, `ARB`, `JL` | portero, árbitro, juez de línea (árbitros y jueces de línea no salen en los datos de jugadores) |
 | sin caja | entrenadores, suplentes, recogepelotas y público: se detectan pero **no** son jugadores |
-| círculo amarillo | balón detectado |
+| círculo amarillo | balón detectado (en el minimapa: relleno = visto, hueco = interpolado o en los pies de quien lo lleva) |
+| color de la caja | equipo según el color de la camiseta; un jugador **nunca** cambia de equipo a mitad de clip |
 | aviso "PLANO DESCARTADO" | primer plano de un jugador/entrenador, público, banquillo, gráficos: ese tramo **no genera datos** |
 
 Reglas (como SkillCorner): solo se usan planos abiertos de la cámara principal; un plano con una persona
@@ -73,7 +75,13 @@ calentando) es *staff* y no se dibuja.
 2. Menú *Entorno de ejecución → Cambiar tipo de entorno de ejecución → **GPU T4*** → Guardar.
 3. *Entorno de ejecución → **Ejecutar todas***. La primera vez tarda unos 3 minutos (instala y descarga
    los modelos). Al final verás la verificación, las tablas y un zip para descargar.
-4. Para tu vídeo: `notebooks/01_tu_partido.ipynb` (subida directa o desde Google Drive).
+4. Para tu vídeo: `notebooks/01_tu_partido.ipynb` (subida directa o desde Google Drive), o en el
+   cuaderno 00 pon `SUBIR_MI_VIDEO = True`.
+
+**¿Estoy usando la última versión?** La primera celda imprime por ejemplo
+`soccercal 0.4.0 (código 1a2b3c4 2026-09-26 10:00) listo`. Cada vez que la ejecutas descarga lo último
+(antes de la 0.4.0 no lo hacía: si ves `0.3.0`, abre el cuaderno de nuevo desde GitHub o haz
+*Entorno de ejecución → Desconectar y eliminar entorno* y vuelve a ejecutar todo).
 
 ---
 
@@ -180,7 +188,8 @@ son estimaciones, no medidas en este repositorio. Más rápido: `--model yolo11s
 | no se reproduce `verificacion.mp4` en el navegador | ábrelo con QuickTime o VLC (códec mp4v) |
 | quieres rehacer el análisis con otro modelo | añade `--redo` |
 | el balón se pierde a menudo | ver "El balón" más abajo: con un detector entrenado en fútbol mejora mucho |
-| salen etiquetas `id12` en vez de dorsales | normal cuando el dorsal no se ve (jugador de frente o lejos); con más minutos de vídeo se leen más |
+| salen etiquetas `id12` en vez de dorsales | el dorsal no se ha visto con claridad (jugador siempre de frente o lejos); con más minutos de vídeo se leen más. Un número dudoso nunca se pone |
+| en Colab no cambia nada tras una actualización | ejecuta de nuevo la primera celda y mira la línea `soccercal 0.4.0 (código …)` |
 
 ---
 
@@ -221,14 +230,31 @@ césped (corrige sombra/sol), agrupado en todo el vídeo; una equipación que se
 (sol y sombra) se sigue reconociendo como el mismo equipo. Portero: la persona de color distinto que
 vive junto a una portería; su equipo es el que tiene a sus defensas más cerca de esa portería.
 
-**Dorsales.** En cada fotograma clave se leen las espaldas de los 3 jugadores más grandes con un modelo
-OCR que viene dentro del paquete (sin descargas). Cada identidad vota con todas sus lecturas (un dígito
-necesita 3 votos, porque "7" suele ser medio "17"); dos fragmentos del mismo equipo y dorsal que nunca
-coinciden en pantalla se unen, y dorsales distintos impiden unir.
+**Segunda mirada (pasada 1b, solo donde falta algo).** Con el primer resultado ya se sabe dónde
+buscar:
+* *Balón*: en los fotogramas sin balón se vuelve a pasar el detector sobre un recorte alrededor de
+  donde debería estar (interpolado entre las detecciones de antes y después), ampliado ~2,4×: un
+  balón de 7 px pasa a 17 px. Sin pista cercana, se busca en toda la imagen por teselas.
+* *Dorsales*: de cada jugador se eligen sus mejores vistas de todo el clip (las cajas más grandes, sin
+  otro jugador delante) y se leen con dos métodos complementarios que vienen dentro del paquete (sin
+  descargas): (1) localizar las cifras como manchas claras (u oscuras) que contrastan con el color
+  de la camiseta y leer solo ese recorte; (2) detector de texto + reconocedor sobre la espalda
+  ampliada y enfocada. Cada identidad vota con todas sus lecturas (un dígito necesita 3 votos, porque
+  "7" suele ser medio "17"); un número dudoso no se pone. Dos fragmentos del mismo equipo y dorsal que
+  nunca coinciden en pantalla se unen, y dorsales distintos impiden unir.
+
+**Nunca más de 11 por equipo.** Si un equipo tiene más de 10 identidades de campo, algunas son el mismo
+jugador visto otra vez: una asignación óptima une los fragmentos (cada tramo recibe un predecesor
+posible físicamente, uno de los 10 "huecos" libres o, como último recurso, un hueco extra muy caro),
+respetando dorsales y la incertidumbre de posición de los jugadores lejanos. Además, el seguimiento
+nunca da a un jugador que ha mostrado la camiseta de un equipo una detección que viste claramente la
+del otro: dos jugadores que se cruzan no se intercambian.
 
 **Salida tipo SkillCorner.** Remuestreo a 10 fps; huecos cortos con curva de Hermite; jugadores
 fuera de plano movidos con su equipo (`is_detected: false`); una posición extrapolada que la cámara
-estaba viendo se descarta (si estuviera ahí, se habría detectado).
+estaba viendo se descarta (si estuviera ahí, se habría detectado). El balón no visto se interpola
+entre detecciones cercanas o se pone en los pies de quien lo lleva (hasta 2 s después de verlo en
+sus pies, o 1,5 s antes de reaparecer en los pies de quien luego lo conserva).
 
 ---
 

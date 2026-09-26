@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from .analysis import ANALYSIS_VERSION, Analysis, analyze
-from .ball import track_ball
+from .ball import ball_timeline, track_ball
 from .cameras import Segment, solve_cameras
 from .config import Config
 from .physical import physical_summary, speeds
@@ -40,6 +40,7 @@ class Result:
     table: pd.DataFrame  # long format, one row per player per output frame
     physical: pd.DataFrame
     timings: dict
+    ball_out: pd.DataFrame | None = None  # the ball at 10 fps: x, y, is_detected, kind, possession
 
     # ------------------------------------------------------------ summaries
     def summary(self) -> dict:
@@ -66,8 +67,19 @@ class Result:
             "output_frames": int(len(self.out_t)),
             "pct_player_rows_detected": round(100.0 * float(self.table["is_detected"].mean()), 1) if len(self.table) else 0.0,
             "ball_detected_pct": round(100.0 * float(self.ball_det[[c is not None for c in self.cameras]].mean()), 1) if valid else 0.0,
+            "ball_known_pct_output": self._ball_known_pct(),
             **{k: round(v, 1) for k, v in self.timings.items()},
         }
+
+    def _ball_known_pct(self) -> float | None:
+        if self.ball_out is None or not len(self.ball_out):
+            return None
+        ft = np.array([fd.t for fd in self.analysis.frames])
+        near = np.clip(np.searchsorted(ft, self.out_t), 0, len(ft) - 1)
+        valid = np.array([self.cameras[i] is not None for i in near])
+        if not valid.any():
+            return 0.0
+        return round(100.0 * float((self.ball_out["kind"].values[valid] != "").mean()), 1)
 
     def save(self, out_dir: str | Path) -> dict:
         from .skillcorner import write_skillcorner
@@ -77,6 +89,8 @@ class Result:
         paths = write_skillcorner(self, out)
         self.table.to_csv(out / "tracking.csv", index=False)
         self.physical.to_csv(out / "physical.csv", index=False)
+        if self.ball_out is not None:
+            self.ball_out.to_csv(out / "ball.csv", index=False)
         cam_rows = []
         for fd, c in zip(self.analysis.frames, self.cameras):
             if c is None:
@@ -141,12 +155,46 @@ def build(an: Analysis, cfg: Config | None = None) -> Result:
         table["timestamp"] = table["t"] - t_first + cfg.time_offset_s
         table["speed_kmh"] = table["speed_ms"] * 3.6
     phys = physical_summary(table[table["role"].isin(["player", "goalkeeper"])]) if len(table) else pd.DataFrame()
-    return Result(an, cfg, cams, segs, trk, ball_pos, ball_det, out_t, table, phys, tim)
+    players = {}
+    if len(table):
+        pl = table[table["role"].isin(["player", "goalkeeper"])]
+        for k, g in pl.groupby("frame"):
+            players[int(k)] = (g["player_id"].astype(int).tolist(), g[["x", "y"]].values)
+    team_of = {i.pid: i.team for i in trk.identities}
+    ball_out = ball_timeline(frame_t, near, valid, ball_pos, ball_det, out_t, players, team_of, an.proc_fps)
+    return Result(an, cfg, cams, segs, trk, ball_pos, ball_det, out_t, table, phys, tim, ball_out)
 
 
 # settings that change what the slow pass computes (everything else is re-done in seconds)
 PASS1_KEYS = ("start_s", "max_seconds", "stride", "keyframe_every", "det_model", "det_imgsz", "det_conf", "ball_conf",
               "jersey_ocr", "jersey_crops", "cut_threshold")
+
+
+def second_look(an: Analysis, res: "Result", cfg: Config, progress: bool = True) -> bool:
+    """Pass 1b (see ``refine.py``): high-resolution ball search where the ball is missing, and
+    shirt numbers read on each player's best views. Runs once per analysis (remembered in
+    ``an.config``). Returns True if ``an`` changed."""
+    changed = False
+    if cfg.ball_refine and not an.config.get("ball_refined"):
+        from .detect import PlayerDetector
+        from .refine import refine_ball
+
+        det = PlayerDetector(cfg.det_model, cfg.device, cfg.det_imgsz, cfg.det_conf, ball_conf=cfg.ball_conf)
+        n = refine_ball(an.video, an, res.cameras, res.ball_pos, res.ball_det, det, progress=progress, batch=cfg.batch)
+        an.config["ball_refined"] = True
+        an.config["ball_refined_frames"] = n
+        changed = True
+    if cfg.jersey_ocr and not an.config.get("numbers_read"):
+        from .jersey import JerseyReader
+        from .refine import read_numbers
+
+        reader = JerseyReader()
+        if reader.available:
+            an.config["numbers_read_count"] = read_numbers(an, res.tracking, reader, progress=progress,
+                                                           per_identity=cfg.jersey_views)
+            an.config["numbers_read"] = True
+            changed = True
+    return changed
 
 
 def _in_view(cam, xy, margin: float = 0.02) -> bool:
@@ -183,6 +231,9 @@ def run(video: str | Path, out_dir: str | Path = "salida", cfg: Config | None = 
         an = analyze(video, cfg, progress=progress)
         an.save(cache)
     res = build(an, cfg)
+    if second_look(an, res, cfg, progress=progress):  # targeted second pass on the video (cached)
+        an.save(cache)
+        res = build(an, cfg)
     res.save(out)
     if render:
         from .viz import render_video
