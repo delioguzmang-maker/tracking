@@ -173,6 +173,12 @@ en una T4 de Colab o un Mac M1/M2 Pro espera del orden de 10 fotogramas por segu
 **unos 1–3 minutos por minuto de vídeo** a 25 fps, la mitad con `--stride 2`. Estas cifras de GPU
 son estimaciones, no medidas en este repositorio. Más rápido: `--model yolo11s.pt`.
 
+La **segunda mirada** (balón en alta resolución + dorsales por jugador) añade, medido aquí en CPU con el
+clip Bayern–PSG de 14 s, unos 6 minutos: ~3 min para los dorsales (hasta 80 vistas por jugador, así que
+no crece con la duración del partido) y el resto para buscar el balón donde faltaba (esto sí crece con
+el vídeo; en GPU es rápido). Se hace una sola vez y queda guardada. Para desactivarla:
+`Config(ball_refine=False)` o menos vistas con `Config(jersey_views=30)`.
+
 ---
 
 ## Problemas frecuentes

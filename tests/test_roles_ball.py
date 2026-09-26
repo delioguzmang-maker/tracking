@@ -214,3 +214,18 @@ def test_vote_number_with_lineup():
     assert vote_number([(7, 0.9), (7, 0.9)], allowed=squad)[0] is None  # 7 is not in the squad
     assert vote_number([(2, 0.9), (2, 0.9)], allowed=squad)[0] is None  # 2 could be half of 27: 3 votes
     assert vote_number([(63, 0.9), (63, 0.9), (17, 0.8), (17, 0.8)], allowed=squad) == (17, 2)
+
+
+def test_dribble_chain_bridges_only_when_it_connects():
+    from soccercal.ball import _dribbles
+    t = np.arange(60) / 25.0
+    pos = np.full((60, 2), np.nan)
+    det = np.zeros(60, bool)
+    for k in list(range(0, 10)) + list(range(40, 50)):  # the ball seen before and after the dribble
+        pos[k], det[k] = [0.2 * k, 0.0], True
+    dribble = {"frames": list(range(12, 38)), "pos": [np.array([0.2 * k, 0.3]) for k in range(12, 38)],
+               "e": [0.1] * 26, "feet": [True] * 26, "score": 2.6}
+    boot = {"frames": list(range(12, 38)), "pos": [np.array([0.2 * k, 25.0]) for k in range(12, 38)],
+            "e": [0.3] * 26, "feet": [True] * 26, "score": 7.8}  # somebody else's white boots, 25 m away
+    _dribbles([boot, dribble], pos, det, t)
+    assert det[12:38].all() and np.allclose(pos[20], [4.0, 0.3])
