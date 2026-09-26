@@ -115,7 +115,7 @@ def _ball_tracklets(C, t, fps, vmax, max_miss_s):
         for k in np.nonzero(~used)[0]:
             active.append({"frames": [i], "pos": [xy[k]], "e": [e[k]], "feet": [bool(feet[k])], "v": np.zeros(2),
                            "v_known": False, "score": float(e[k])})
-    return [_trim(tr) for tr in tracks + active]
+    return tracks + active
 
 
 def _trim(tr: dict) -> dict | None:
@@ -142,8 +142,8 @@ def track_ball(an: Analysis, cams: list, ball_conf: float = 0.03, vmax: float = 
     fps = an.proc_fps
     t = np.array([fd.t for fd in an.frames])
     C = [candidates(fd, c, ball_conf) for fd, c in zip(an.frames, cams)]
-    trs = [tr for tr in _ball_tracklets(C, t, fps, vmax, max_miss_s)
-           if tr is not None and tr["score"] - restart_cost > 0 and len(tr["frames"]) >= 2]
+    raw = _ball_tracklets(C, t, fps, vmax, max_miss_s)
+    trs = [tr for tr in map(_trim, raw) if tr is not None and tr["score"] - restart_cost > 0 and len(tr["frames"]) >= 2]
     trs.sort(key=lambda tr: tr["frames"][-1])
     ends = [tr["frames"][-1] for tr in trs]
     best = np.zeros(len(trs) + 1)
@@ -167,6 +167,7 @@ def track_ball(an: Analysis, cams: list, ball_conf: float = 0.03, vmax: float = 
             k = prev[k] - 1
         else:
             k -= 1
+    _dribbles(raw, pos, det, t)
     # interpolate short gaps between chosen detections
     idx = np.nonzero(det)[0]
     for a, b in zip(idx[:-1], idx[1:]):
@@ -176,9 +177,40 @@ def track_ball(an: Analysis, cams: list, ball_conf: float = 0.03, vmax: float = 
     return pos, det
 
 
+def _dribbles(raw: list, pos: np.ndarray, det: np.ndarray, t: np.ndarray, min_s: float = 0.3, near_s: float = 1.5,
+              far_s: float = 3.0, reach: float = 3.0, speed: float = 12.0) -> None:
+    """Fill gaps of the chosen trajectory with chains of at-feet candidates (a player dribbling:
+    the detector only sees the ball next to his boots). A chain is accepted only if it connects
+    to the known ball: where the ball is known on both sides (within ``far_s``), both ends must
+    be reachable from it; at the edge of the known trajectory, the one side must be and the
+    chain must last ``min_s``. A white boot of some other player does not connect."""
+    feet_only = [tr for tr in raw if all(tr["feet"]) and len(tr["frames"]) >= 3
+                 and t[tr["frames"][-1]] - t[tr["frames"][0]] >= min_s and tr["score"] / len(tr["frames"]) > -0.2]
+    for tr in sorted(feet_only, key=lambda tr: -len(tr["frames"])):
+        f0, f1 = tr["frames"][0], tr["frames"][-1]
+        if det[f0:f1 + 1].any():
+            continue
+        known = np.nonzero(det)[0]
+        k = np.searchsorted(known, f0)
+        a = known[k - 1] if k > 0 and t[f0] - t[known[k - 1]] <= far_s else None
+        b = known[k] if k < len(known) and t[known[k]] - t[f1] <= far_s else None
+        if a is None and b is None:
+            continue
+
+        def joins(p, q, dt):
+            return dt <= near_s and np.linalg.norm(np.asarray(p) - q) <= reach + speed * dt
+
+        ok_a = a is not None and joins(tr["pos"][0], pos[a], t[f0] - t[a])
+        ok_b = b is not None and joins(tr["pos"][-1], pos[b], t[b] - t[f1])
+        if (a is not None and not ok_a) or (b is not None and not ok_b):
+            continue
+        for f, p in zip(tr["frames"], tr["pos"]):
+            pos[f], det[f] = p, True
+
+
 def ball_timeline(frame_t: np.ndarray, near: np.ndarray, valid: np.ndarray, ball_pos: np.ndarray, ball_det: np.ndarray,
                   out_t: np.ndarray, players: dict, team_of: dict, fps_an: float, carry_s: float = 2.0,
-                  back_s: float = 1.5, keep_poss_s: float = 3.0, poss_dist: float = 1.5):
+                  back_s: float = 1.5, keep_poss_s: float = 3.0, poss_dist: float = 1.5, pass_speed: float = 7.0):
     """The ball on the output grid, with possession. Returns a DataFrame (one row per output
     frame): x, y, is_detected, kind ('detected' / 'interpolated' / 'carried' / ''), possession
     player and team.
@@ -211,6 +243,26 @@ def ball_timeline(frame_t: np.ndarray, near: np.ndarray, valid: np.ndarray, ball
         j = int(np.argmin(d))
         return pids[j] if d[j] < poss_dist else None
 
+    # A slow gap (< ``pass_speed``: not a pass) that starts at a player's feet is a dribble: the
+    # ball follows that player, not a straight line through empty grass.
+    k = 0
+    while k < n:
+        if kind[k] != "interpolated":
+            k += 1
+            continue
+        e = k
+        while e < n and kind[e] == "interpolated":
+            e += 1
+        a, b = k - 1, e  # known (seen) frames around the gap
+        if a >= 0 and b < n and kind[a] == "detected" and kind[b] == "detected":
+            v = np.hypot(bx[b] - bx[a], by[b] - by[a]) / max(out_t[b] - out_t[a], 1e-6)
+            h = holder(a)
+            if v < pass_speed and h is not None and e - k >= 3:
+                for j in range(k, e):
+                    p = at(j, h)
+                    if p is not None:
+                        bx[j], by[j], kind[j] = p[0], p[1], "carried"
+        k = e
     poss = [None] * n
     pid, last_seen, cand, cand_n = None, -1e9, None, 0
     for k in range(n):  # forward: possession with hysteresis (a new holder must keep it 0.3 s)
