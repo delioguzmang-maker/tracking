@@ -300,10 +300,22 @@ extrapolación siguiendo al equipo bajó el error fuera de cámara de 6,1 m a 3,
 | clip | posición conocida | detectado directamente | muestra revisada a ojo |
 |---|---|---|---|
 | clip de 1080p, 6 s | **77 %** | 49 % | 48 de 48 posiciones eran el balón real |
-| Bayern–PSG original, 720p, 14 s | **70 %** | 41 % | 48 de 48 posiciones eran el balón real |
+| Bayern–PSG original, 720p, 14 s | **84,5 %** | 43 % | todas las posiciones exportadas revisadas a ojo: en el balón o en los pies de quien lo lleva |
 
 El resto está interpolado entre detecciones o en los pies del jugador que lo lleva. Antes de los filtros,
-en el Bayern–PSG el "balón" elegido era casi siempre la bota flúor de un jugador.
+en el Bayern–PSG el "balón" elegido era casi siempre la bota flúor de un jugador, y durante 1,2 s un
+punto blanco de las vallas publicitarias (ahora se exige césped por encima del candidato).
+
+**Dorsales** (Bayern–PSG, 720p): se comprobó a ojo cada jugador. De los 10 cuyo dorsal llega a verse
+en algún momento, se leen 7 (Bayern 2, 6, 9, 10, 17, 27; PSG 25), **ninguno equivocado**, y a los otros
+10 (siempre de frente o lejos) no se les inventa ninguno. Antes de esta versión se leían 3. Con la
+alineación (`home_numbers` / `away_numbers`) se descartan además las lecturas imposibles.
+
+**Identidades** (banco sintético con 22 trayectorias reales de Metrica, 3 partidos de 3 minutos):
+50/46/28 identidades → **23/23/23**; IDF1 0,72/0,83/0,93 → **0,96/0,99/0,99**; error de los
+jugadores fuera de cámara (mediana) 4,7/2,4/2,8 m → 2,6/2,0/1,8 m. En el Bayern–PSG: 10 + portero del
+PSG, 10 del Bayern, y ninguna detección con la camiseta del otro equipo (antes, dos jugadores se
+intercambiaban a mitad de clip y salían con el color equivocado).
 
 **Bayern–PSG original** (vídeo de la semifinal, 720p, 59,94 fps aunque la cabecera del archivo dice
 52,2: los fps se miden con las marcas de tiempo reales):
@@ -312,7 +324,7 @@ en el Bayern–PSG el "balón" elegido era casi siempre la bota flúor de un jug
 * Los dos entrenadores de negro junto a la banda son *staff*: no se dibujan ni salen en los datos.
 * El árbitro sale una sola vez, aunque tapado por jugadores lo detectan dos cajas.
 * El portero del PSG se asigna al PSG.
-* Dorsales leídos: #17 y #27 del Bayern y #25 del PSG.
+* Dorsales leídos: 2, 6, 9, 10, 17 y 27 del Bayern y 25 del PSG (todos correctos).
 * La calibración cae sobre las líneas reales en todo el clip (círculo central, área, portería).
 
 Formato verificado: `tests/test_export.py` carga la salida con kloppy, y el visor oficial
@@ -330,7 +342,7 @@ Diferente / pendiente:
 
 * **Identidades y dorsales.** SkillCorner conoce la alineación, reconoce dorsales y revisa a mano
   (anuncian ~97 % de identidades correctas). Aquí los dorsales se leen con OCR cuando la espalda del
-  jugador es visible y está cerca de la cámara (en el clip de prueba a 720p: 3 de 22 jugadores en 14 s;
+  jugador es visible y está cerca de la cámara (en el clip de prueba a 720p: 7 de 22 jugadores en 14 s;
   en un partido completo y a 1080p se leen muchos más). Un jugador sin dorsal leído que sale mucho rato
   de plano puede volver con otro `id`: habrá más identidades que jugadores. Con dorsal, los fragmentos se
   unen automáticamente.
