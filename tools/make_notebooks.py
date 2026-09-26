@@ -8,18 +8,27 @@ REPO = "https://github.com/delioguzmang-maker/tracking"
 BRANCH = "claude/soccernet-calibration-pkg-r8517j"
 
 SETUP = f'''# 1) INSTALACIÓN — en Colab tarda ~2 min; en tu Mac (ya instalado) no hace nada.
+# Descarga SIEMPRE la última versión del código (volver a ejecutar esta celda actualiza).
 import sys, subprocess, os
 EN_COLAB = "google.colab" in sys.modules
 if EN_COLAB:
+    RAMA = "{BRANCH}"
     if not os.path.exists("tracking"):
-        # rama con el código; si ya está fusionada en main, git usa la rama por defecto
-        r = subprocess.run(["git", "clone", "-q", "-b", "{BRANCH}", "{REPO}"])
-        if r.returncode != 0:
+        r = subprocess.run(["git", "clone", "-q", "-b", RAMA, "{REPO}"])
+        if r.returncode != 0:  # la rama ya se fusionó: rama por defecto
             subprocess.run(["git", "clone", "-q", "{REPO}"], check=True)
+    else:  # ya estaba descargado: traer lo último (si no, seguirías usando la versión vieja)
+        subprocess.run(["git", "-C", "tracking", "fetch", "-q", "origin"], check=True)
+        ref = "origin/" + RAMA
+        if subprocess.run(["git", "-C", "tracking", "rev-parse", "-q", "--verify", ref], capture_output=True).returncode:
+            ref = "origin/HEAD"
+        subprocess.run(["git", "-C", "tracking", "reset", "-q", "--hard", ref], check=True)
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-e", "tracking[notebooks]"], check=True)
     sys.path.insert(0, os.path.abspath("tracking"))
+for _m in [m for m in sys.modules if m == "soccercal" or m.startswith("soccercal.")]:
+    del sys.modules[_m]  # sin reiniciar el entorno: se carga el código recién descargado
 import soccercal
-print("soccercal", soccercal.__version__, "listo")'''
+print("soccercal", soccercal.version(), "listo")'''
 
 
 def md(s):
@@ -76,8 +85,15 @@ celda, se reutiliza y todo lo demás tarda segundos.
 import soccercal
 from soccercal import Config
 
-video = soccercal.get_sample_video()          # descarga el clip de 6 s
-cfg = Config(home_name="Chelsea", away_name="Barcelona")
+SUBIR_MI_VIDEO = False   # True = en Colab te pide subir tu propio vídeo; False = clip de prueba de 6 s
+
+if SUBIR_MI_VIDEO and EN_COLAB:
+    from google.colab import files
+    video = next(iter(files.upload()))
+    cfg = Config(home_name="Local", away_name="Visitante")
+else:
+    video = soccercal.get_sample_video()          # descarga el clip de 6 s
+    cfg = Config(home_name="Chelsea", away_name="Barcelona")
 res = soccercal.run(video, "salida_demo", cfg)   # analiza + calibra + sigue + exporta + vídeo
 res.summary()
 '''),

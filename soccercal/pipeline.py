@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .analysis import Analysis, analyze
+from .analysis import ANALYSIS_VERSION, Analysis, analyze
 from .ball import track_ball
 from .cameras import Segment, solve_cameras
 from .config import Config
@@ -167,6 +167,8 @@ def run(video: str | Path, out_dir: str | Path = "salida", cfg: Config | None = 
         an = Analysis.load(cache)
         new = cfg.to_dict()
         changed = [k for k in PASS1_KEYS if an.config.get(k) != new.get(k)]
+        if an.config.get("analysis_version") != ANALYSIS_VERSION:
+            changed.append("versión del programa")
         if Path(an.video).name != Path(video).name:
             changed.append("video")
         if changed:

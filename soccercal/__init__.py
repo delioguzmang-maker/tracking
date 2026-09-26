@@ -4,7 +4,21 @@
     res = soccercal.run("partido.mp4", "salida/")     # todo el proceso
     res.table.head()                                  # posiciones a 10 fps
 """
-__version__ = "0.3.0"
+__version__ = "0.4.0"
+
+
+def version() -> str:
+    """Version plus the exact code commit (to check that Colab / your Mac run the latest code)."""
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    try:
+        out = subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%h %cd", "--date=format:%Y-%m-%d %H:%M"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        out = ""
+    return f"{__version__} (código {out})" if out else __version__
 
 _LAZY = {
     "Config": ("config", "Config"),

@@ -96,6 +96,9 @@ def _person_features(frame: np.ndarray, det: Detections, grass_bgr: np.ndarray):
     return desc, color
 
 
+ANALYSIS_VERSION = 4  # bump when the first (neural network) pass changes what it stores
+
+
 def auto_stride(fps: float, target: float = 25.0) -> int:
     return max(1, int(round(fps / target)))
 
@@ -175,6 +178,7 @@ def analyze(video: str | Path, cfg: Config | None = None, progress: bool = True,
     reg = Registrar(W, H)
     out = Analysis(str(video), fps, W, H, n_total, cfg.to_dict())
     out.config["stride_used"] = stride
+    out.config["analysis_version"] = ANALYSIS_VERSION
     out.config["header_fps"] = header_fps
     out.config["jersey_ocr_available"] = bool(jersey and jersey.available)
 
