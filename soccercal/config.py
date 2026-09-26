@@ -52,6 +52,10 @@ class Config:
     time_offset_s: float = 0.0  # match clock at the first processed frame
     home_name: str = "Team A"
     away_name: str = "Team B"
+    # optional squad numbers (lineup + substitutes), e.g. [1, 2, 4, 6, 9, 10, 17, 27]: shirt number
+    # readings outside them are dropped, and which kit colour is the home team is found from them
+    home_numbers: list | None = None
+    away_numbers: list | None = None
     pitch_length: float = 105.0
     pitch_width: float = 68.0
     extra: dict = field(default_factory=dict)

@@ -211,8 +211,9 @@ print(VIDEO)
 | `jersey_views` | vistas de cada jugador que se leen en la segunda mirada (80; menos = más rápido) |
 | `ball_refine` | segunda búsqueda del balón en alta resolución donde no se encontró (`True`) |
 | `players_per_team` | máximo de identidades por equipo (11 = 10 de campo + portero; `None` = sin límite) |
+| `home_numbers`, `away_numbers` | **opcional pero muy útil**: los dorsales de cada equipo (titulares y suplentes), p. ej. `[1, 2, 4, 6, 9, 10, 17, 27]`. Se descartan lecturas imposibles y se sabe qué color es el local |
 | `det_model` | `yolo11m.pt` (equilibrado), `yolo11s.pt` (rápido), `yolo11x.pt` (preciso) |
-| `home_name`, `away_name` | nombres de los equipos (el "local" es el primer color detectado; revisa `summary.json`) |
+| `home_name`, `away_name` | nombres de los equipos (sin `home_numbers`/`away_numbers`, el "local" es el primer color detectado; revisa el vídeo) |
 | `period`, `time_offset_s` | parte del partido y minuto de reloj del primer fotograma |
 | `extrapolate` | rellenar jugadores fuera de cámara (`is_detected=False`), como SkillCorner |
 """),
@@ -225,6 +226,8 @@ cfg = Config(
     det_model="yolo11m.pt",
     jersey_ocr=True,                # leer dorsales
     home_name="Local", away_name="Visitante",
+    home_numbers=None,              # opcional: [1, 2, 4, 6, 9, ...] dorsales del local (titulares + suplentes)
+    away_numbers=None,              # opcional: dorsales del visitante
     period=1, time_offset_s=0,
 )
 res = soccercal.run(VIDEO, "salida_partido", cfg)

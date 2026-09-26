@@ -206,3 +206,11 @@ def test_ball_search_windows_follow_the_trajectory():
         uv, _ = cam.project(np.array([[-5.0 + 0.5 * k, 0.0, 0.11]]))
         (x0, y0, x1, y1), = win[k]
         assert x0 <= uv[0, 0] <= x1 and y0 <= uv[0, 1] <= y1 and x1 - x0 == int(1280 / 2.4)
+
+
+def test_vote_number_with_lineup():
+    squad = {1, 2, 4, 6, 9, 10, 17, 27}
+    assert vote_number([(6, 0.9), (6, 0.9), (1, 0.6)], allowed=squad) == (6, 2)  # 6 cannot be half of 17 / 27
+    assert vote_number([(7, 0.9), (7, 0.9)], allowed=squad)[0] is None  # 7 is not in the squad
+    assert vote_number([(2, 0.9), (2, 0.9)], allowed=squad)[0] is None  # 2 could be half of 27: 3 votes
+    assert vote_number([(63, 0.9), (63, 0.9), (17, 0.8), (17, 0.8)], allowed=squad) == (17, 2)

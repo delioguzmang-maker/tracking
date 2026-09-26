@@ -171,13 +171,29 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
             tl.desc = md / (np.linalg.norm(md) + 1e-9)
         tls.append(tl)
 
+    # ---- lineups (optional): which kit is the home team, and which numbers exist
+    allowed = {}
+    if cfg.home_numbers and cfg.away_numbers:
+        home, away = set(cfg.home_numbers), set(cfg.away_numbers)
+        hits = np.zeros((2, 2))  # [kit group, home / away]
+        for tl in tls:
+            if tl.team in (0, 1):
+                for n, _ in tl.jersey_reads:
+                    hits[tl.team] += [n in home, n in away]
+        if hits[0, 1] + hits[1, 0] > hits[0, 0] + hits[1, 1]:  # kit group 0 wears the away numbers
+            _swap_teams(tm, meas, tls)
+        allowed = {0: home, 1: away}
+        for tl in tls:
+            tl.number, _ = vote_number(tl.jersey_reads, allowed=allowed.get(tl.team))
+
     # ---- stitching into identities
     scfg = StitchConfig(max_gap_s=cfg.stitch_max_gap_s, **cfg.extra.get("stitch", {}))
     motion = TeamMotion(tls, fps, n)
     chains = stitch(tls, fps, scfg, n_frames=n, motion=motion)
     idents = []
     for k, ch in enumerate(chains, start=1):
-        number, votes = vote_number([r for t in ch for r in t.jersey_reads])
+        reads = [r for t in ch for r in t.jersey_reads]
+        number, votes = vote_number(reads)
         team, conf, group = OTHER, 0.0, None
         if tm is not None:
             D = [meas[f].desc[d] for t in ch for f, d in zip(t.frames, t.det_idx) if np.isfinite(meas[f].desc[d][0])]
@@ -185,6 +201,8 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
                 dist = tm.distances(np.array(D))
                 team, conf = decide(dist, has_number=number is not None)
                 group = int(np.bincount(np.argmin(dist, 1)).argmax())
+        if allowed:
+            number, votes = vote_number(reads, allowed=allowed.get(team))
         ident = Identity(k, team, "player" if team != OTHER else "referee", ch, number=number, number_votes=votes,
                          kit_group=group)
         z = np.concatenate([t.z for t in ch])
@@ -223,6 +241,19 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
             t.team = ident.team
     motion = TeamMotion([t for i in idents for t in i.tracklets], fps, n)
     return TrackingOutput(idents, tm, colors, assignments, meas, motion)
+
+
+def _swap_teams(tm: TeamModel | None, meas: list, tls: list) -> None:
+    """Relabel kit group 0 <-> 1 (the lineups say group 0 is the away team)."""
+    if tm is not None:
+        tm.groups[0], tm.groups[1] = tm.groups[1], tm.groups[0]
+        tm.sizes[[0, 1]] = tm.sizes[[1, 0]]
+    for m in meas:
+        if m is not None and m.label is not None:
+            m.label = np.where(m.label == 0, 1, np.where(m.label == 1, 0, m.label))
+    for tl in tls:
+        if tl.team in (0, 1):
+            tl.team = 1 - tl.team
 
 
 def kit_labels(tm: TeamModel | None, desc: np.ndarray, margin: float = 0.2) -> np.ndarray:

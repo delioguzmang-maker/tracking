@@ -170,8 +170,15 @@ class JerseyReader:
         return out
 
 
-def vote_number(reads: list[tuple[int, float]], min_votes: int = 2, min_share: float = 0.6) -> tuple[int | None, int]:
-    """Shirt number of one identity from all its readings -> (number or None, votes)."""
+def vote_number(reads: list[tuple[int, float]], min_votes: int = 2, min_share: float = 0.6,
+                allowed: set | None = None) -> tuple[int | None, int]:
+    """Shirt number of one identity from all its readings -> (number or None, votes).
+
+    ``allowed``: the team's squad numbers, if known (``Config.home_numbers``): other readings are
+    misreadings and are dropped, and a single digit then needs one vote less unless it could
+    be half of a two-digit squad number ("7" of "17")."""
+    if allowed:
+        reads = [(n, s) for n, s in reads if n in allowed]
     if not reads:
         return None, 0
     c = Counter()
@@ -179,7 +186,8 @@ def vote_number(reads: list[tuple[int, float]], min_votes: int = 2, min_share: f
         c[n] += s
     n, w = c.most_common(1)[0]
     votes = sum(1 for m, _ in reads if m == n)
-    need = min_votes + (1 if n < 10 else 0)  # one digit is often half of a two-digit number
+    ambiguous = n < 10 and (not allowed or any(m >= 10 and n in (m // 10, m % 10) for m in allowed))
+    need = min_votes + (1 if ambiguous else 0)  # one digit is often half of a two-digit number
     if votes >= need and w / sum(c.values()) >= min_share:
         return n, votes
     return None, votes

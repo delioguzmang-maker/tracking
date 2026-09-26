@@ -104,6 +104,12 @@ def _sample(args) -> int:
     return 0
 
 
+def _numbers(txt: str | None) -> list | None:
+    if not txt:
+        return None
+    return [int(x) for x in txt.replace(";", ",").replace(" ", ",").split(",") if x.strip().isdigit()]
+
+
 def _track(args) -> int:
     from .config import Config
     from .pipeline import run
@@ -111,7 +117,8 @@ def _track(args) -> int:
     cfg = Config(device=args.device, start_s=args.start, max_seconds=args.max_seconds, stride=args.stride,
                  keyframe_every=args.keyframe_every, det_model=args.model, batch=args.batch,
                  home_name=args.home_name, away_name=args.away_name, extrapolate=not args.no_extrapolate,
-                 period=args.period, time_offset_s=args.time_offset, jersey_ocr=not args.no_jersey)
+                 period=args.period, time_offset_s=args.time_offset, jersey_ocr=not args.no_jersey,
+                 home_numbers=_numbers(args.home_numbers), away_numbers=_numbers(args.away_numbers))
     t = time.time()
     res = run(args.video, args.out, cfg, render=not args.no_render, reuse_analysis=not args.redo)
     print(json.dumps(res.summary(), indent=2, ensure_ascii=False))
@@ -172,6 +179,9 @@ def main(argv=None) -> int:
     p.add_argument("--batch", type=int, default=8)
     p.add_argument("--home-name", default="Team A")
     p.add_argument("--away-name", default="Team B")
+    p.add_argument("--home-numbers", default=None,
+                   help='dorsales del equipo local (alineación + suplentes), p. ej. "1,2,4,6,9,10,17,27" (opcional)')
+    p.add_argument("--away-numbers", default=None, help="dorsales del equipo visitante (opcional)")
     p.add_argument("--period", type=int, default=1)
     p.add_argument("--time-offset", type=float, default=0.0, help="reloj del partido (s) en el primer fotograma")
     p.add_argument("--no-extrapolate", action="store_true", help="solo posiciones vistas por la cámara")
