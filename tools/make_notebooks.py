@@ -76,7 +76,10 @@ from soccercal.cli import main as soccercal_cli
 soccercal_cli(["doctor"])
 '''),
     md("""
-## 3) Procesar el clip de prueba
+## 3) Procesar el clip de prueba (o tu vídeo)
+Para tu propio vídeo de Google Drive pon su nombre en `VIDEO_EN_DRIVE`, por ejemplo
+`VIDEO_EN_DRIVE = "trim psg bayern.mp4"` (se busca en todas las carpetas de *Mi unidad*).
+
 La primera pasada ejecuta las redes neuronales (lo lento: ~15 s en Colab GPU, ~40 s en un Mac M1/M2,
 varios minutos en CPU). Queda guardada en `salida_demo/analysis.pkl.gz`: si vuelves a ejecutar la
 celda, se reutiliza y todo lo demás tarda segundos.
@@ -85,9 +88,13 @@ celda, se reutiliza y todo lo demás tarda segundos.
 import soccercal
 from soccercal import Config
 
-SUBIR_MI_VIDEO = False   # True = en Colab te pide subir tu propio vídeo; False = clip de prueba de 6 s
+VIDEO_EN_DRIVE = None    # o el nombre de un vídeo de tu Google Drive, p. ej. "trim psg bayern.mp4"
+SUBIR_MI_VIDEO = False   # True = en Colab te pide subir tu propio vídeo desde el ordenador
 
-if SUBIR_MI_VIDEO and EN_COLAB:
+if VIDEO_EN_DRIVE and EN_COLAB:
+    video = soccercal.video_from_drive(VIDEO_EN_DRIVE)  # pide permiso para abrir tu Drive la 1ª vez
+    cfg = Config(home_name="Local", away_name="Visitante")
+elif SUBIR_MI_VIDEO and EN_COLAB:
     from google.colab import files
     video = next(iter(files.upload()))
     cfg = Config(home_name="Local", away_name="Visitante")
@@ -190,15 +197,15 @@ fuera de las líneas **no** se cuentan como jugadores.
     md("## Elegir el vídeo"),
     code('''
 VIDEO = "mi_partido.mp4"     # en tu Mac: ruta completa, p. ej. "/Users/tu_nombre/Downloads/partido.mp4"
+VIDEO_EN_DRIVE = None        # en Colab (recomendado): nombre del vídeo en tu Google Drive, p. ej. "trim psg bayern.mp4"
 
-if EN_COLAB and not os.path.exists(VIDEO):
-    # Opción A: subir desde el ordenador (lento para archivos grandes)
+if EN_COLAB and VIDEO_EN_DRIVE:
+    VIDEO = str(soccercal.video_from_drive(VIDEO_EN_DRIVE))  # busca en todo "Mi unidad" y lo copia aquí
+elif EN_COLAB and not os.path.exists(VIDEO):
+    # sin Drive: subir desde el ordenador (lento para archivos grandes)
     from google.colab import files
     subido = files.upload()
     VIDEO = next(iter(subido))
-    # Opción B (recomendada para partidos): Google Drive
-    # from google.colab import drive; drive.mount("/content/drive")
-    # VIDEO = "/content/drive/MyDrive/partido.mp4"
 print(VIDEO)
 '''),
     md("""

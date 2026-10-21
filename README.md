@@ -69,19 +69,32 @@ calentando) es *staff* y no se dibuja.
 
 ## Opción 1 — Google Colab (lo más fácil, no instalas nada)
 
-1. Abre <https://colab.research.google.com> → *Archivo → Abrir cuaderno → GitHub* y pega
-   `https://github.com/delioguzmang-maker/tracking`. Elige `notebooks/00_empezar_aqui.ipynb`
-   (si no aparece, cambia la rama a `claude/soccernet-calibration-pkg-r8517j`).
-2. Menú *Entorno de ejecución → Cambiar tipo de entorno de ejecución → **GPU T4*** → Guardar.
-3. *Entorno de ejecución → **Ejecutar todas***. La primera vez tarda unos 3 minutos (instala y descarga
-   los modelos). Al final verás la verificación, las tablas y un zip para descargar.
-4. Para tu vídeo: `notebooks/01_tu_partido.ipynb` (subida directa o desde Google Drive), o en el
-   cuaderno 00 pon `SUBIR_MI_VIDEO = True`.
+1. Abre <https://colab.research.google.com> → *Archivo → Abrir cuaderno → pestaña **GitHub*** y pega
+   `https://github.com/delioguzmang-maker/tracking`. Elige `notebooks/00_empezar_aqui.ipynb`.
+   **Ábrelo siempre así, desde GitHub**: una copia guardada antes en tu Drive o en "Recientes" es la
+   versión vieja del cuaderno.
+2. Si ya tenías Colab abierto con una versión anterior: *Entorno de ejecución → **Desconectar y
+   eliminar entorno de ejecución***.
+3. Menú *Entorno de ejecución → Cambiar tipo de entorno de ejecución → **GPU T4*** → Guardar.
+4. **Tu vídeo de Google Drive**: en la celda del paso *3) Procesar* cambia
+   `VIDEO_EN_DRIVE = None` por `VIDEO_EN_DRIVE = "trim psg bayern.mp4"` (el nombre exacto del archivo,
+   en cualquier carpeta de *Mi unidad*). Colab te pedirá permiso para abrir tu Drive. Si lo dejas en
+   `None` se procesa el clip de prueba de 6 s.
+5. *Entorno de ejecución → **Ejecutar todas***. La primera celda debe imprimir
+   `soccercal 0.4.0 (código …) listo`. Al final verás el vídeo de verificación, las tablas y un zip.
+
+El cuaderno `01_tu_partido.ipynb` es lo mismo con todos los parámetros (tramo, alineaciones…) y la
+misma opción `VIDEO_EN_DRIVE`.
 
 **¿Estoy usando la última versión?** La primera celda imprime por ejemplo
-`soccercal 0.4.0 (código 1a2b3c4 2026-09-26 10:00) listo`. Cada vez que la ejecutas descarga lo último
-(antes de la 0.4.0 no lo hacía: si ves `0.3.0`, abre el cuaderno de nuevo desde GitHub o haz
-*Entorno de ejecución → Desconectar y eliminar entorno* y vuelve a ejecutar todo).
+`soccercal 0.4.0 (código 1a2b3c4 2026-10-21 10:00) listo`. Cada vez que la ejecutas descarga lo último.
+Si ves `0.3.0` o la celda no imprime el código, estás en un cuaderno viejo: repite los pasos 1 y 2.
+
+**Cuando la retransmisión deja de enseñar el campo** (público, banquillo, primer plano de un jugador):
+esos fotogramas no se usan para medir nada (el vídeo de verificación lo indica con un aviso), pero los
+22 jugadores **siguen en los datos**: su posición se estima a partir de dónde estaban y de cómo se
+movía su equipo (`is_detected: false`), y cuando vuelve el plano general cada uno recupera su
+identidad.
 
 ---
 

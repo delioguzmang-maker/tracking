@@ -29,6 +29,7 @@ _LAZY = {
     "render_video": ("viz", "render_video"),
     "load_kloppy": ("skillcorner", "load_kloppy"),
     "get_sample_video": ("weights", "get_sample_video"),
+    "video_from_drive": ("weights", "video_from_drive"),
 }
 
 

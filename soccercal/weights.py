@@ -138,3 +138,29 @@ def get_sample_video(dest: str | os.PathLike | None = None) -> Path:
     if not path.exists():
         download(SAMPLE_VIDEO_URL, path)
     return path
+
+
+def video_from_drive(name: str, copy: bool = True) -> Path:
+    """In Google Colab: find a video in your Google Drive by its file name (any folder of "My
+    Drive", e.g. ``video_from_drive("trim psg bayern.mp4")``), mounting the Drive if needed, and
+    copy it next to the notebook (the video is read several times; reading from the Drive is
+    slow). Returns the local path."""
+    import glob
+    import shutil
+
+    root = "/content/drive"
+    if not os.path.isdir(os.path.join(root, "MyDrive")):
+        from google.colab import drive  # only inside Colab
+
+        drive.mount(root)
+    hits = sorted(glob.glob(os.path.join(root, "MyDrive", "**", glob.escape(name)), recursive=True))
+    if not hits:
+        raise FileNotFoundError(f"No encuentro '{name}' en tu Google Drive (Mi unidad). Revisa el nombre exacto.")
+    src = Path(hits[0])
+    if not copy:
+        return src
+    dst = Path("/content") / src.name
+    if not dst.exists() or dst.stat().st_size != src.stat().st_size:
+        print(f"Copiando {src} -> {dst} ({src.stat().st_size / 1e6:.0f} MB)...")
+        shutil.copy(src, dst)
+    return dst

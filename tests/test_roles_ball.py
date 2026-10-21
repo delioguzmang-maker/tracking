@@ -229,3 +229,18 @@ def test_dribble_chain_bridges_only_when_it_connects():
             "e": [0.3] * 26, "feet": [True] * 26, "score": 7.8}  # somebody else's white boots, 25 m away
     _dribbles([boot, dribble], pos, det, t)
     assert det[12:38].all() and np.allclose(pos[20], [4.0, 0.3])
+
+
+def test_video_from_drive_finds_by_name(tmp_path, monkeypatch):
+    import os
+    from soccercal import weights
+    drive = tmp_path / "content" / "drive" / "MyDrive" / "partidos"
+    drive.mkdir(parents=True)
+    (drive / "trim psg bayern.mp4").write_bytes(b"x" * 10)
+    real_join = os.path.join
+
+    def join(a, *p):  # redirect /content to the temporary folder
+        return real_join(str(tmp_path) + a if a.startswith("/content") else a, *p)
+    monkeypatch.setattr(weights.os.path, "join", join)
+    found = weights.video_from_drive("trim psg bayern.mp4", copy=False)
+    assert found.name == "trim psg bayern.mp4" and found.parent.name == "partidos"
