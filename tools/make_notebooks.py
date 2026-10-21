@@ -130,17 +130,24 @@ for ax, n in zip(axes, (10, 140)):
 plt.tight_layout(); plt.show()
 '''),
     code('''
-# Ver el vídeo completo dentro del cuaderno (en Colab o Jupyter)
+# Ver el vídeo de verificación dentro del cuaderno (en Colab o Jupyter)
 from base64 import b64encode
 from IPython.display import HTML
-import subprocess, shutil
+import subprocess, shutil, os
 src = "salida_demo/verificacion.mp4"
-# mp4v no se reproduce en todos los navegadores: se convierte a H.264 si hay ffmpeg
+# mp4v no se reproduce en todos los navegadores: se convierte a H.264 si hay ffmpeg. Un vídeo muy
+# largo no cabe dentro del cuaderno: se muestra el primer minuto y el completo va en el zip del final.
 if shutil.which("ffmpeg"):
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", src, "-vcodec", "libx264", "-pix_fmt", "yuv420p",
-                    "salida_demo/verificacion_h264.mp4"])
+    largo = os.path.getsize(src) > 50e6
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", src] + (["-t", "60"] if largo else []) +
+                   ["-vcodec", "libx264", "-pix_fmt", "yuv420p", "salida_demo/verificacion_h264.mp4"])
+    if largo:
+        print("Vídeo largo: aquí se ve el primer minuto; el completo está en salida_demo/verificacion.mp4")
     src = "salida_demo/verificacion_h264.mp4"
-HTML(f'<video width=800 controls src="data:video/mp4;base64,{b64encode(open(src, "rb").read()).decode()}"></video>')
+if os.path.getsize(src) < 80e6:
+    display(HTML(f'<video width=800 controls src="data:video/mp4;base64,{b64encode(open(src, "rb").read()).decode()}"></video>'))
+else:
+    print("El vídeo es demasiado grande para verlo aquí: descárgalo con el zip del final.")
 '''),
     md("""
 ## 5) Los datos
