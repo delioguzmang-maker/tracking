@@ -21,6 +21,7 @@ import numpy as np
 from scipy.ndimage import uniform_filter1d
 from scipy.optimize import linear_sum_assignment
 
+from .jersey import numbers_compatible
 from .teams import OTHER
 
 
@@ -38,6 +39,7 @@ class Tracklet:
     outside: float = 0.0  # share of positions outside the lines (staff-like when high)
     jersey_reads: list = field(default_factory=list)  # [(number, confidence)] from OCR
     number: int | None = None  # voted shirt number
+    number_hint: int | None = None  # weaker reading: only used to forbid links (``jersey.number_hint``)
     # filled by ``endpoints``
     p0: np.ndarray = field(default_factory=lambda: np.zeros(2))
     v0: np.ndarray = field(default_factory=lambda: np.zeros(2))
@@ -136,7 +138,7 @@ def link_cost(a: Tracklet, b: Tracklet, fps: float, cfg: StitchConfig, motion: T
     if (a.outside >= 0.6 and b.outside <= 0.2) or (b.outside >= 0.6 and a.outside <= 0.2):
         return np.inf  # a touchline official / coach never becomes a player
     same_number = a.number is not None and a.number == b.number
-    if a.number is not None and b.number is not None and not same_number:
+    if not numbers_compatible(a.number_hint or a.number, b.number_hint or b.number):
         return np.inf  # two different shirt numbers: two different players
     h = min(dt, cfg.horizon)
     drift = np.zeros(2)

@@ -213,26 +213,65 @@ class JerseyReader:
         return out
 
 
+def numbers_compatible(a: int | None, b: int | None) -> bool:
+    """Can two readings be the same shirt? A reading can lose a digit (the thin "1" of 17, the
+    "5" of 25 at the edge of the crop) but practically never invents one: 2 and 25 may be the
+    same shirt, 8 and 25 may not. Unknown is compatible with everything."""
+    if a is None or b is None or a == b:
+        return True
+    lo, hi = min(a, b), max(a, b)
+    return lo < 10 <= hi and lo in (hi // 10, hi % 10)
+
+
+def _absorb_partials(c: Counter, votes: Counter, min_host_votes: int = 2) -> None:
+    """Single-digit readings count for a two-digit number of the same identity that contains
+    the digit (they are that number with one digit lost), if that number was read in full at
+    least ``min_host_votes`` times (one stray "16" must not turn six "6" into 16)."""
+    for d in [n for n in c if n < 10]:
+        hosts = [m for m in c if m >= 10 and d in (m // 10, m % 10) and votes[m] >= min_host_votes]
+        if hosts:
+            m = max(hosts, key=lambda k: c[k])
+            c[m] += c.pop(d)
+            votes[m] += votes.pop(d)
+
+
 def vote_number(reads: list[tuple[int, float]], min_votes: int = 2, min_share: float = 0.6,
                 allowed: set | None = None) -> tuple[int | None, int]:
     """Shirt number of one identity from all its readings -> (number or None, votes).
 
-    ``allowed``: the team's squad numbers, if known (``Config.home_numbers``): other readings are
-    misreadings and are dropped, and a single digit then needs one vote less unless it could
-    be half of a two-digit squad number ("7" of "17")."""
+    A single digit that is part of a two-digit number also read on the same identity counts
+    for that number ("2" x3 + "25" x1 -> 25). ``allowed``: the team's squad numbers, if known
+    (``Config.home_numbers``): other readings are misreadings and are dropped, and a single
+    digit then needs one vote less unless it could be half of a two-digit squad number
+    ("7" of "17")."""
     if allowed:
         reads = [(n, s) for n, s in reads if n in allowed]
     if not reads:
         return None, 0
-    c = Counter()
+    c, votes = Counter(), Counter()
     for n, s in reads:
         c[n] += s
+        votes[n] += 1
+    _absorb_partials(c, votes)
     n, w = c.most_common(1)[0]
     if n != 1 and 1 in c:  # thin vertical stripes read as "1": weak evidence against another number
         c[1] *= 0.3
-    votes = sum(1 for m, _ in reads if m == n)
     ambiguous = n < 10 and (not allowed or any(m >= 10 and n in (m // 10, m % 10) for m in allowed))
     need = min_votes + (1 if ambiguous else 0)  # one digit is often half of a two-digit number
-    if votes >= need and w / sum(c.values()) >= min_share:
-        return n, votes
-    return None, votes
+    if votes[n] >= need and w / sum(c.values()) >= min_share:
+        return n, votes[n]
+    return None, votes[n]
+
+
+def number_hint(reads: list[tuple[int, float]], min_votes: int = 2, min_share: float = 0.6) -> int | None:
+    """Weaker evidence than ``vote_number`` (no extra vote for single digits): enough to say
+    that two tracklets are *not* the same player, never used as a label."""
+    if not reads:
+        return None
+    c, votes = Counter(), Counter()
+    for n, s in reads:
+        c[n] += s
+        votes[n] += 1
+    _absorb_partials(c, votes)
+    n, w = c.most_common(1)[0]
+    return n if votes[n] >= min_votes and w / sum(c.values()) >= min_share else None

@@ -10,7 +10,7 @@ from .analysis import Analysis
 from .camera import Camera
 from .config import Config
 from .detect import DESC_DIM
-from .jersey import vote_number
+from .jersey import number_hint, numbers_compatible, vote_number
 from .stitch import StitchConfig, TeamMotion, Tracklet, link_cost, stitch
 from .teams import OTHER, TeamModel, decide, fit_team_model
 from .tracker import PitchTracker, rts_smooth
@@ -145,6 +145,7 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
     for t in trackers_out:
         labs = np.array([meas[o[0]].label[o[3]] for o in t.obs])
         pieces += [t.obs[a:b] for a, b in split_by_team(labs)]
+    pieces = trim_handovers(pieces, meas, an, int(round(0.4 * fps)))
     tls = []
     for k, obs in enumerate(pieces, start=1):
         if len(obs) < 3:
@@ -164,6 +165,7 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
             if jr and p in jr:
                 tl.jersey_reads.append(jr[p])
         tl.number, _ = vote_number(tl.jersey_reads)
+        tl.number_hint = number_hint(tl.jersey_reads)
         if good.any() and tm is not None:
             tl.team, tl.team_conf = decide(tm.distances(descs[good]), has_number=tl.number is not None)
         if good.any():
@@ -214,7 +216,8 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
     _assign_goalkeepers(idents, cfg)
     mark_assistant_referees(idents, cfg)
     idents = merge_unique_roles(idents)
-    idents = fill_roster(idents, cfg, fps, motion, scfg)
+    idents = fill_roster(idents, cfg, fps, motion, scfg, allowed_numbers=allowed)
+    idents = merge_by_number(idents)  # numbers were re-voted on the joined identities
     for ident in idents:
         _trajectory(ident, fps)
 
@@ -254,6 +257,42 @@ def _swap_teams(tm: TeamModel | None, meas: list, tls: list) -> None:
     for tl in tls:
         if tl.team in (0, 1):
             tl.team = 1 - tl.team
+
+
+def trim_handovers(pieces: list, meas: list, an: Analysis, max_overlap: int, min_iou: float = 0.3) -> list:
+    """A track that ends a few frames after another one started, on the same place of the image,
+    is one player whose box changed (a box cut at the feet starts a new track; far away that is
+    metres in depth). The overlapping frames are duplicates: they are removed from the old track
+    so that the two can be joined. ``pieces``: lists of tracker observations (frame, z, R, row, score)."""
+    def box(o):
+        return an.frames[o[0]].det.persons().boxes[int(meas[o[0]].det_idx[o[3]])]
+
+    def team(obs):
+        lab = np.array([meas[o[0]].label[o[3]] for o in obs])
+        lab = lab[lab >= 0]
+        return int(np.bincount(lab).argmax()) if len(lab) else -1
+
+    teams = [team(p) if p else -1 for p in pieces]
+    for i, a in enumerate(pieces):
+        if not a:
+            continue
+        for j, b in enumerate(pieces):
+            if i == j or not b or not a or teams[i] != teams[j]:
+                continue
+            b0, a0, a1 = b[0][0], a[0][0], a[-1][0]
+            if not (a0 < b0 <= a1 <= b0 + max_overlap):
+                continue
+            at = {o[0]: o for o in a if o[0] >= b0}
+            both = [(at[o[0]], o) for o in b if o[0] in at]
+            if not both:
+                continue
+            from .refine import _iou
+
+            ious = [float(_iou(box(x)[None], box(y)[None])[0, 0]) for x, y in both]
+            if np.median(ious) >= min_iou:
+                pieces[i] = [o for o in a if o[0] < b0]
+                a = pieces[i]
+    return pieces
 
 
 def kit_labels(tm: TeamModel | None, desc: np.ndarray, margin: float = 0.2) -> np.ndarray:
@@ -365,6 +404,36 @@ def merge_unique_roles(idents: list[Identity], dup_dist: float = 2.0) -> list[Id
     return [i for i in idents if i.pid not in drop]
 
 
+def _concurrent_duplicates(T: list, k_max: int, max_len: int) -> set:
+    """Indices of short tracklets (< ``max_len`` observations) to drop until no moment has more
+    than ``k_max`` tracklets of one team at the same time."""
+    if not T:
+        return set()
+    end = max(t.end for t in T) + 1
+    cnt = np.zeros(end, int)
+    for t in T:
+        cnt[t.start:t.end + 1] += 1
+    drop = set()
+    while cnt.max() > k_max:
+        f = int(np.argmax(cnt))
+        cand = [k for k, t in enumerate(T) if k not in drop and t.start <= f <= t.end and len(t.frames) < max_len]
+        if not cand:
+            break
+        k = min(cand, key=lambda k: len(T[k].frames))
+        drop.add(k)
+        cnt[T[k].start:T[k].end + 1] -= 1
+    return drop
+
+
+def _gap_to(host: Identity, tl) -> float:
+    """Median distance between a tracklet and an identity's positions at the same frames."""
+    f = np.concatenate([t.frames for t in host.tracklets])
+    z = np.concatenate([t.z for t in host.tracklets])
+    at = {int(a): b for a, b in zip(f, z)}
+    d = [np.linalg.norm(p - at[int(g)]) for g, p in zip(tl.frames, tl.z) if int(g) in at]
+    return float(np.median(d)) if d else np.inf
+
+
 def _median_gap(host: Identity, other: Identity) -> float:
     """Median distance between ``other``'s observations and ``host``'s (interpolated) path."""
     hf = np.concatenate([t.frames for t in host.tracklets]).astype(float)
@@ -381,7 +450,8 @@ def _median_gap(host: Identity, other: Identity) -> float:
 
 
 def fill_roster(idents: list[Identity], cfg: Config, fps: float, motion: TeamMotion | None,
-                scfg: StitchConfig | None = None, min_keep_s: float = 1.0) -> list[Identity]:
+                scfg: StitchConfig | None = None, min_keep_s: float = 1.0,
+                allowed_numbers: dict | None = None) -> list[Identity]:
     """A team has 10 outfield players on the pitch. When a team has more outfield identities
     than that, some are the same player seen again: join them.
 
@@ -396,6 +466,7 @@ def fill_roster(idents: list[Identity], cfg: Config, fps: float, motion: TeamMot
         return idents
     from scipy.optimize import linear_sum_assignment
 
+    allowed_numbers = allowed_numbers or {}
     k_max = cfg.players_per_team - 1
     relaxed = StitchConfig(**{**(scfg.__dict__ if scfg else {}), "max_gap_s": 1e9})
     BIG, EXTRA, BONUS = 1e9, 1e4, 100.0
@@ -410,18 +481,31 @@ def fill_roster(idents: list[Identity], cfg: Config, fps: float, motion: TeamMot
             for t in sorted(ident.tracklets, key=lambda t: t.start):
                 T.append(t)
                 owner.append(gi)
+        # more than 10 at the same moment: the shortest of them are duplicate boxes (two boxes on
+        # one player, a box on two overlapping players): drawn with a teammate, not exported
+        dup = _concurrent_duplicates(T, k_max, int(round(min_keep_s * fps)))
+        if dup:
+            for k in dup:
+                host = min((i for j, i in enumerate(grp) if j != owner[k]), key=lambda h: _gap_to(h, T[k]),
+                           default=None)
+                if host is not None:
+                    host.absorbed.append(T[k])
+            keep = [k for k in range(len(T)) if k not in dup]
+            T, owner = [T[k] for k in keep], [owner[k] for k in keep]
         n = len(T)
-        num = [grp[o].number for o in owner]
+        # a tracklet's own reading first (the stitcher may have attached it to the wrong player),
+        # else the number of the identity it belongs to
+        num = [T[a].number_hint or T[a].number or grp[owner[a]].number for a in range(len(T))]
         C = np.full((n, n), BIG)
         for a in range(n):
             for b in range(n):
-                if T[a].end >= T[b].start or (num[a] is not None and num[b] is not None and num[a] != num[b]):
+                if T[a].end >= T[b].start or not numbers_compatible(num[a], num[b]):
                     continue
                 c = link_cost(T[a], T[b], fps, relaxed, motion)
                 if np.isfinite(c):
                     C[a, b] = c
         for a in range(n - 1):  # the stitcher's own links (consecutive tracklets of one identity)
-            if owner[a] == owner[a + 1]:
+            if owner[a] == owner[a + 1] and C[a, a + 1] < BIG:
                 C[a, a + 1] = min(C[a, a + 1], 0.0) - BONUS
         M = np.vstack([C, np.zeros((k_max, n)), np.full((n, n), EXTRA)])
         rows, cols = linear_sum_assignment(M)
@@ -441,10 +525,9 @@ def fill_roster(idents: list[Identity], cfg: Config, fps: float, motion: TeamMot
                 frames_by_owner[owner[k]] = frames_by_owner.get(owner[k], 0) + len(T[k].frames)
             host = grp[max(frames_by_owner, key=lambda o: (o not in used, frames_by_owner[o]))]
             pid = host.pid if host.pid not in {i.pid for i in new} else None
-            numbers = [grp[o].number for o in frames_by_owner if grp[o].number is not None]
-            votes = sum(grp[o].number_votes for o in frames_by_owner if grp[o].number is not None)
+            number, votes = vote_number([r for k in path for r in T[k].jersey_reads], allowed=allowed_numbers.get(team))
             ident = Identity(pid if pid is not None else -1, team, "player", [T[k] for k in path],
-                             number=numbers[0] if numbers else None, number_votes=votes, kit_group=host.kit_group)
+                             number=number, number_votes=votes, kit_group=host.kit_group)
             used.add(grp.index(host))
             new.append(ident)
         free = iter(sorted({i.pid for i in grp} - {i.pid for i in new}))

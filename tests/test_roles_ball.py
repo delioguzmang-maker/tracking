@@ -244,3 +244,36 @@ def test_video_from_drive_finds_by_name(tmp_path, monkeypatch):
     monkeypatch.setattr(weights.os.path, "join", join)
     found = weights.video_from_drive("trim psg bayern.mp4", copy=False)
     assert found.name == "trim psg bayern.mp4" and found.parent.name == "partidos"
+
+
+def test_partial_number_readings():
+    from soccercal.jersey import number_hint, numbers_compatible
+    assert numbers_compatible(2, 25) and numbers_compatible(5, 25) and numbers_compatible(None, 7)
+    assert not numbers_compatible(8, 25) and not numbers_compatible(17, 27) and not numbers_compatible(3, 8)
+    assert vote_number([(2, 0.9)] * 3 + [(25, 0.9)] * 2)[0] == 25  # "2" is 25 with the 5 lost
+    assert vote_number([(6, 0.9)] * 6 + [(16, 0.8)])[0] == 6  # one stray "16" does not turn six 6s into 16
+    assert number_hint([(8, 0.9), (8, 0.8), (6, 0.5)]) == 8  # enough to forbid joining with a #25
+
+
+def test_handover_duplicate_frames_are_trimmed():
+    """A box cut at the feet starts a new track while the old one still has one frame on the
+    same player: the old track's overlapping frame is removed so the two can be joined."""
+    from soccercal.players import trim_handovers
+
+    class M:  # measurement rows -> detection indices, kit labels
+        def __init__(self, n):
+            self.det_idx, self.label = np.arange(n), np.ones(n, int)
+    frames, meas = [], []
+    for f in range(20):
+        boxes, scores = [], []
+        if f <= 12:
+            boxes.append([100, 50, 120, 110]); scores.append(0.9)  # old track: full box
+        if f >= 12:
+            boxes.append([101, 50, 121, 95]); scores.append(0.9)  # new track: same player, cut at the feet
+        frames.append(_fd(boxes, scores, [0] * len(boxes), t=f / 25))
+        meas.append(M(len(boxes)))
+    an = Analysis("synthetic", 25.0, 1280, 720, 20, {"stride_used": 1}, frames)
+    old = [(f, np.zeros(2), np.eye(2), 0, 0.9) for f in range(13)]
+    new = [(f, np.zeros(2), np.eye(2), 1 if f == 12 else 0, 0.9) for f in range(12, 20)]
+    a, b = trim_handovers([old, new], meas, an, 10)
+    assert a[-1][0] == 11 and len(b) == 8

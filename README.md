@@ -94,7 +94,9 @@ Si ves `0.3.0` o la celda no imprime el código, estás en un cuaderno viejo: re
 esos fotogramas no se usan para medir nada (el vídeo de verificación lo indica con un aviso), pero los
 22 jugadores **siguen en los datos**: su posición se estima a partir de dónde estaban y de cómo se
 movía su equipo (`is_detected: false`), y cuando vuelve el plano general cada uno recupera su
-identidad.
+identidad. Probado con tu Bayern–PSG al que se le insertaron 1,8 s de público y 1,5 s de primer plano
+de #17 en mitad de la jugada: los 20 jugadores vistos antes del corte conservan su identidad después,
+durante el corte siguen los 21 en los datos y en el minimapa, y salen 10 + portero (PSG) y 10 (Bayern).
 
 ---
 
