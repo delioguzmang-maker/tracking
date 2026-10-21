@@ -58,8 +58,12 @@ calentando) es *staff* y no se dibuja.
 
 ![vídeo de verificación](docs/verificacion_ejemplo.jpg)
 
-*Arriba: campo dibujado a partir de la calibración (magenta) e identidades. Abajo: minimapa
-(relleno = visto, hueco = extrapolado, gris = lo que ve la cámara).*
+*Arriba: campo dibujado a partir de la calibración (magenta) e identidades. Abajo: minimapa visto
+desde arriba (relleno = visto, hueco = posición estimada, gris = lo que ve la cámara). La estela de
+cada jugador es de dónde viene (últimos 2 s; se desvanece hacia el pasado) y la flechita, hacia dónde
+va. Ojo: en la tele un movimiento hacia la banda lejana casi no se nota (la profundidad está
+comprimida), en el minimapa sí; un jugador que "va de izquierda a derecha" en pantalla puede estar
+haciendo una diagonal.*
 
 ![la salida abierta en el visor oficial de SkillCorner](docs/visor_skillcorner.jpg)
 

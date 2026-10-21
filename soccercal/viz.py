@@ -79,10 +79,18 @@ class PitchCanvas:
             ov = img.copy()
             cv2.fillPoly(ov, [self.px(footprint)], (200, 200, 200))
             img = cv2.addWeighted(ov, 0.25, img, 0.75, 0)
-        if trails:
+        if trails:  # where each player comes from (last 2 s): faint and thin at the old end
             for tr, col in trails.values():
                 if len(tr) > 1:
-                    cv2.polylines(img, [self.px(tr)], False, col, 1, cv2.LINE_AA)
+                    P = self.px(tr)
+                    for k in range(1, len(P)):
+                        a = k / (len(P) - 1)  # 0 = oldest, 1 = now
+                        c = tuple(int(255 * (1 - a) * 0.6 + v * (0.4 + 0.6 * a)) for v in col)  # fades towards white
+                        cv2.line(img, tuple(P[k - 1]), tuple(P[k]), c, 1 + int(2 * a), cv2.LINE_AA)
+                    v = tr[-1] - tr[max(0, len(tr) - 4)]  # last 0.3 s
+                    if np.linalg.norm(v) > 0.45:  # faster than 1.5 m/s: arrowhead in the direction of travel
+                        tip = self.px([tr[-1] + v / np.linalg.norm(v) * 2.0])[0]
+                        cv2.arrowedLine(img, tuple(P[-1]), tuple(tip), col, 1, cv2.LINE_AA, tipLength=0.5)
         for x, y, pid, col, detected in players:
             c = tuple(self.px([[x, y]])[0])
             if detected:
@@ -90,7 +98,22 @@ class PitchCanvas:
                 cv2.circle(img, c, 9, (255, 255, 255), 1, cv2.LINE_AA)
             else:
                 cv2.circle(img, c, 8, col, 2, cv2.LINE_AA)
-            cv2.putText(img, str(pid), (c[0] + 9, c[1] - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+        # labels after all the dots (no dot hides a label), moved if they would cover another label or dot
+        taken = [(p[0] - 9, p[1] - 9, p[0] + 9, p[1] + 9) for p in (self.px([[x, y]])[0] for x, y, *_ in players)]
+        for x, y, pid, col, detected in players:
+            c = tuple(self.px([[x, y]])[0])
+            txt = str(pid)
+            (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+            options = [(10, -8), (10, 16), (-12 - tw, -8), (-12 - tw, 16), (10, -22), (-12 - tw, -22), (10, 30)]
+            for dx, dy in options:
+                box = (c[0] + dx, c[1] + dy - th, c[0] + dx + tw, c[1] + dy)
+                if not any(box[0] < b[2] and b[0] < box[2] and box[1] < b[3] and b[1] < box[3] for b in taken):
+                    break
+            else:
+                box = (c[0] + 10, c[1] - 8 - th, c[0] + 10 + tw, c[1] - 8)
+            taken.append(box)
+            cv2.putText(img, txt, (box[0], box[3]), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(img, txt, (box[0], box[3]), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
         if ball is not None and np.isfinite(ball[:2]).all():
             c = tuple(self.px([ball[:2]])[0])
             if len(ball) < 3 or ball[2]:  # seen
@@ -206,7 +229,10 @@ def render_video(res, path: str | Path, progress: bool = True, max_frames: int |
         if cam is not None and res.ball_out is not None and k >= 0 and res.ball_out["kind"].iat[k]:
             b = res.ball_out.iloc[k]
             ball = np.array([b["x"], b["y"], float(b["is_detected"])])
-        tr_draw = {pid: (np.array(tr)[:, 1:], team_color(ident[pid].team, colors)) for pid, tr in trails.items() if tr}
+        # only players on the minimap now: a player who stopped appearing leaves no orphan trail
+        shown = {int(r.player_id) for r in g.itertuples(index=False)} if g is not None else set()
+        tr_draw = {pid: (np.array(tr)[:, 1:], team_color(ident[pid].team, colors)) for pid, tr in trails.items()
+                   if tr and pid in shown and tr[-1][0] == k}
         mini = canvas.draw(players, ball, fp, tr_draw)
         cv2.putText(mini, f"t={fd.t:6.2f}s  frame {idx}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         vw.write(np.vstack([top, mini]))
