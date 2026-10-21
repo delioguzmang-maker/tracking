@@ -88,7 +88,8 @@ def _doctor(args) -> int:
         from .jersey import JerseyReader
 
         if not JerseyReader().available:
-            raise RuntimeError("falta rapidocr_onnxruntime: pip install rapidocr_onnxruntime (sin él no se leen dorsales)")
+            raise RuntimeError("falta rapidocr_onnxruntime (sin él no se leen dorsales): "
+                               "pip install --ignore-requires-python rapidocr_onnxruntime==1.4.4")
         return "lector de dorsales disponible"
 
     step("Lectura de dorsales (OCR)", ocr_check)

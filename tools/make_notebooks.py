@@ -11,6 +11,13 @@ SETUP = f'''# 1) INSTALACIÓN — en Colab tarda ~2 min; en tu Mac (ya instalado
 # Descarga SIEMPRE la última versión del código (volver a ejecutar esta celda actualiza).
 import sys, subprocess, os
 EN_COLAB = "google.colab" in sys.modules
+
+def _pip(*args):
+    r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", *args], capture_output=True, text=True)
+    if r.returncode:
+        print(r.stdout[-3000:], r.stderr[-3000:], sep="\\n")
+        raise RuntimeError("La instalación falló: copia el mensaje de arriba y envíamelo.")
+
 if EN_COLAB:
     RAMA = "{BRANCH}"
     if not os.path.exists("tracking"):
@@ -23,12 +30,14 @@ if EN_COLAB:
         if subprocess.run(["git", "-C", "tracking", "rev-parse", "-q", "--verify", ref], capture_output=True).returncode:
             ref = "origin/HEAD"
         subprocess.run(["git", "-C", "tracking", "reset", "-q", "--hard", ref], check=True)
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-e", "tracking[notebooks]"], check=True)
+    _pip("-e", "tracking[colab]")
+    # lector de dorsales: su ficha dice "Python < 3.13" pero funciona en 3.13 (el Python de Colab)
+    _pip("--ignore-requires-python", "rapidocr_onnxruntime==1.4.4")
     sys.path.insert(0, os.path.abspath("tracking"))
 for _m in [m for m in sys.modules if m == "soccercal" or m.startswith("soccercal.")]:
     del sys.modules[_m]  # sin reiniciar el entorno: se carga el código recién descargado
 import soccercal
-print("soccercal", soccercal.version(), "listo")'''
+print("Python", sys.version.split()[0], "| soccercal", soccercal.version(), "listo")'''
 
 
 def md(s):
