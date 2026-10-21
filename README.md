@@ -305,12 +305,15 @@ extrapolación siguiendo al equipo bajó el error fuera de cámara de 6,1 m a 3,
 
 | clip | posición conocida | detectado directamente | muestra revisada a ojo |
 |---|---|---|---|
-| clip de 1080p, 6 s | **77 %** | 49 % | 48 de 48 posiciones eran el balón real |
+| clip de 1080p, 6 s (Chelsea–Barcelona) | **72 %** | 52 % | todas en el balón o a menos de un diámetro; lo que falta es el disparo de Iniesta (balón en el aire y en la red: sin altura no se puede situar, igual que en SkillCorner) |
 | Bayern–PSG original, 720p, 14 s | **84,5 %** | 43 % | todas las posiciones exportadas revisadas a ojo: en el balón o en los pies de quien lo lleva |
 
 El resto está interpolado entre detecciones o en los pies del jugador que lo lleva. Antes de los filtros,
 en el Bayern–PSG el "balón" elegido era casi siempre la bota flúor de un jugador, y durante 1,2 s un
 punto blanco de las vallas publicitarias (ahora se exige césped por encima del candidato).
+
+**Dorsales en el clip de 1080p** (Chelsea–Barcelona 2009): se leen 33, 26, 35, 3 y 5 del Chelsea y 9 y 10
+del Barcelona, coherentes con las alineaciones de aquel partido.
 
 **Dorsales** (Bayern–PSG, 720p): se comprobó a ojo cada jugador. De los 10 cuyo dorsal llega a verse
 en algún momento, se leen 7 (Bayern 2, 6, 9, 10, 17, 27; PSG 25), **ninguno equivocado**, y a los otros
