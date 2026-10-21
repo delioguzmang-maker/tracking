@@ -390,7 +390,7 @@ def fill_roster(idents: list[Identity], cfg: Config, fps: float, motion: TeamMot
     kinematic + kit link cost; impossible moves and different shirt numbers are forbidden;
     links already made by the stitcher get a large bonus, so they are only broken to fit a
     fragment into a gap), one of the 10 free slots (cost 0), or an extra slot (large cost).
-    Fragments shorter than ``min_keep_s`` that still do not fit are duplicate boxes: they are
+    Fragments seen for less than ``min_keep_s`` that still do not fit are duplicate boxes: they are
     absorbed by the nearest teammate (drawn, not exported)."""
     if not cfg.players_per_team:
         return idents
@@ -454,8 +454,8 @@ def fill_roster(idents: list[Identity], cfg: Config, fps: float, motion: TeamMot
         if len(new) > k_max:  # did not fit: very short leftovers are duplicate boxes
             keep = []
             for ident in sorted(new, key=lambda i: -sum(len(t.frames) for t in i.tracklets)):
-                span = (ident.tracklets[-1].end - ident.tracklets[0].start + 1) / fps
-                if len(keep) >= k_max and span < min_keep_s:
+                seen_s = sum(len(t.frames) for t in ident.tracklets) / fps  # time actually observed
+                if len(keep) >= k_max and seen_s < min_keep_s:
                     host = min(keep, key=lambda h: _median_gap(h, ident))
                     host.absorbed += ident.tracklets
                 else:
