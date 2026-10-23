@@ -4,7 +4,7 @@
     res = soccercal.run("partido.mp4", "salida/")     # todo el proceso
     res.table.head()                                  # posiciones a 10 fps
 """
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 
 def version() -> str:

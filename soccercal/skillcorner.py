@@ -37,6 +37,19 @@ def team_ids() -> dict:
     return {0: 1, 1: 2}
 
 
+def home_attacks_right(table) -> bool:
+    """Whether team A attacks towards +x: a team defends the goal on the side where its goalkeeper
+    stands or, if no goalkeeper was seen, where its players are on average."""
+    if not len(table):
+        return True
+    for team, sign in (("A", 1.0), ("B", -1.0)):
+        gk = table[(table["team"] == team) & (table["role"] == "goalkeeper")]
+        if len(gk):
+            return bool(sign * gk["x"].mean() < 0)
+    tx = [table.loc[table["team"] == t, "x"].mean() for t in ("A", "B")]
+    return not (np.isfinite(tx).all() and tx[0] > tx[1])
+
+
 def match_json(res) -> dict:
     cfg = res.config
     tids = team_ids()
@@ -64,10 +77,8 @@ def match_json(res) -> dict:
             "birthday": None, "gender": "male",
         })
     colors = res.tracking.team_colors
-    # attacking direction: the team whose players sit further left defends the left goal
     side = ["left_to_right", "right_to_left"]
-    tx = [res.table.loc[res.table["team"] == t, "x"].mean() for t in ("A", "B")]
-    if np.isfinite(tx).all() and tx[0] > tx[1]:
+    if not home_attacks_right(res.table):
         side = side[::-1]
     return {
         "id": int(cfg.extra.get("match_id", 1)),

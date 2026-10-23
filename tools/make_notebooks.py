@@ -51,6 +51,8 @@ def code(s):
 def write(name, cells):
     nb = nbf.v4.new_notebook()
     nb["cells"] = cells
+    for i, c in enumerate(cells):  # stable ids: regenerating does not touch unchanged notebooks
+        c["id"] = f"{Path(name).stem[:2]}-{i:03d}"
     nb["metadata"] = {"kernelspec": {"name": "python3", "display_name": "Python 3", "language": "python"},
                       "language_info": {"name": "python"}, "accelerator": "GPU",
                       "colab": {"provenance": [], "gpuType": "T4"}}
@@ -153,7 +155,9 @@ else:
 ## 5) Los datos
 `res.table` tiene una fila por jugador y fotograma (10 fps): posición `x, y` en metros
 (origen en el centro, `x` a lo largo del campo, `y` hacia la banda lejana, igual que SkillCorner),
-`is_detected` (visto por la cámara o extrapolado) y velocidad.
+`is_detected` (visto por la cámara o extrapolado) y velocidad (`speed_kmh`, y `vx, vy` en m/s).
+El cuaderno `02_analisis` calcula con estos datos el control del espacio (Spearman / Laurie Shaw,
+Fernández y Bornn) y el valor del espacio (EPV).
 """),
     code('''
 res.table.head(10)
@@ -318,7 +322,7 @@ def campo(ax=None):
 '''),
     md("## Mapa de calor de un jugador (solo posiciones vistas por la cámara)"),
     code('''
-jug = df[df.role != "referee"].groupby("player_id").size().idxmax()   # el jugador con más datos
+jug = df[df.role.isin(["player", "goalkeeper"])].groupby("player_id").size().idxmax()   # el jugador con más datos
 d = df[(df.player_id == jug) & df.is_detected]
 ax = campo()
 ax.hexbin(d.x, d.y, gridsize=25, extent=(-52.5, 52.5, -34, 34), cmap="hot", alpha=0.7, mincnt=1)
@@ -346,5 +350,143 @@ axs[0].set_title("anchura (m)"); axs[1].set_title("profundidad (m)"); axs[0].leg
     md("## Resumen físico"),
     code('''
 pd.read_csv(f"{CARPETA}/physical.csv").round(1)
+'''),
+    md("""
+---
+# Análisis táctico: quién controla el espacio y cuánto vale
+
+Con las posiciones y velocidades de los 22 jugadores se pueden calcular los modelos clásicos de la
+analítica de fútbol. Funcionan igual con los archivos de SkillCorner (`*_match.json` +
+`*_tracking_extrapolated.jsonl`), así que también sirven con los datos abiertos de SkillCorner.
+
+**Una advertencia importante con vídeo de televisión:** la cámara solo ve una parte del campo. Los
+jugadores que no se ven en ese momento tienen una posición *estimada* (círculo con el centro blanco), y
+un jugador que no aparece nunca en el clip (a menudo un portero) falta. Por eso en los mapas la zona que
+la cámara no ve está en **gris**: ahí el resultado es orientativo.
+"""),
+    md("""
+## 1) Control del espacio (William Spearman 2018, código de Laurie Shaw)
+
+Para cada punto del campo: **probabilidad de que el equipo con el balón lo gane si el balón se juega
+ahí**. Cada jugador sigue corriendo hacia donde iba durante 0,7 s (su tiempo de reacción) y luego va
+en línea recta a 5 m/s; el balón viaja a 15 m/s; el portero atrapa el balón 3 veces más rápido.
+Es el modelo de *Friends of Tracking* (repositorio LaurieOnTracking) con sus mismos parámetros y
+ecuaciones: da **el mismo número** que el código original (lo comprobamos abajo), pero unas 30 veces
+más rápido.
+
+Cómo leerlo: color de un equipo = ese equipo ganaría el balón; blanco = 50/50; flechas = dónde estará
+cada jugador dentro de 1 segundo; anillo negro = quien lleva el balón. Cambia `SEGUNDO` para ver otro
+momento.
+"""),
+    code('''
+from soccercal.tactics import Match, plot_control
+m = Match.load(CARPETA)
+SEGUNDO = 5.6                     # el momento que quieres ver
+k = int(round(SEGUNDO * m.fps))   # fotograma (10 por segundo)
+plot_control(m, k, model="spearman");
+'''),
+    md("""
+## 2) El espacio según Fernández y Bornn (FC Barcelona, "Wide Open Spaces", 2018)
+
+Otra forma de medirlo: cada jugador tiene una "zona de influencia" en forma de óvalo, centrada medio
+segundo por delante de él y estirada en la dirección en la que corre. Cuanto más lejos está del balón,
+más grande es (4 m al lado del balón, 10 m a partir de unos 18 m), porque tiene más tiempo para llegar.
+El control de un equipo combina las influencias de sus jugadores menos las del rival.
+"""),
+    code('''
+plot_control(m, k, model="fernandez");
+'''),
+    md("""
+## 3) Dónde está el espacio que vale (control × EPV)
+
+No todo el espacio vale lo mismo: controlar el balón cerca de la portería rival vale mucho más que en
+tu propio campo. El **EPV** (*Expected Possession Value*) es la probabilidad de que la jugada acabe en
+gol desde cada zona (la superficie que publicó Laurie Shaw en *Friends of Tracking*). Multiplicado por el
+control del espacio indica **dónde un pase sería a la vez seguro y peligroso** para el equipo con el balón.
+"""),
+    code('''
+plot_control(m, k, model="value");
+'''),
+    md("""
+## 4) Territorio a lo largo del tiempo (% del campo que controla cada equipo)
+
+La línea discontinua (solo la parte que ve la cámara) es la más fiable: fuera de cámara las posiciones
+son estimadas y pueden faltar jugadores que el vídeo no ha mostrado nunca.
+"""),
+    code('''
+from soccercal.tactics import control_series
+cs = control_series(m, every=2)
+fig, ax = plt.subplots(figsize=(12, 3))
+ax.plot(cs.t, 100 * cs.home_share, label=f"{m.names[0]}: todo el campo")
+if "home_share_in_view" in cs:
+    ax.plot(cs.t, 100 * cs.home_share_in_view, "--", label=f"{m.names[0]}: solo lo que ve la cámara")
+ax.axhline(50, c="k", lw=0.6); ax.set_ylim(0, 100); ax.set_xlabel("s"); ax.set_ylabel("%"); ax.legend();
+'''),
+    md("## 5) Vídeo del control del espacio (un mapa cada 0,1 s)"),
+    code('''
+from soccercal.tactics import render_control_video
+from base64 import b64encode
+from IPython.display import HTML
+import shutil
+ruta = render_control_video(m, f"{CARPETA}/control_espacio.mp4", model="spearman")
+if not shutil.which("ffmpeg"):
+    print("Sin ffmpeg el vídeo quizá no se vea aquí: ábrelo con VLC (o instala ffmpeg: conda install ffmpeg).")
+if os.path.getsize(ruta) < 80e6:
+    display(HTML(f'<video width=800 controls src="data:video/mp4;base64,{b64encode(open(ruta, "rb").read()).decode()}"></video>'))
+'''),
+    md("""
+## 6) Usar el código original de Laurie Shaw (LaurieOnTracking)
+
+`to_metrica` convierte los datos al formato de los tutoriales de *Friends of Tracking* (tablas
+`tracking_home` y `tracking_away` con columnas `Home_7_x`, `Home_7_vx`, ...), así puedes seguir sus
+tutoriales con tu partido. La celda siguiente descarga su archivo `Metrica_PitchControl.py` de GitHub y
+comprueba que da el mismo resultado que el nuestro.
+"""),
+    code('''
+from soccercal.tactics import to_metrica, pitch_control, grid
+tracking_home, tracking_away, GK_numbers = to_metrica(m)
+print("porteros:", GK_numbers)
+tracking_home.head()
+'''),
+    code('''
+import urllib.request, importlib, sys
+urllib.request.urlretrieve("https://raw.githubusercontent.com/Friends-of-Tracking-Data-FoTD/LaurieOnTracking/"
+                           "master/Metrica_PitchControl.py", "Metrica_PitchControl.py")
+sys.path.insert(0, ".")
+import Metrica_PitchControl as mpc
+s = m.snapshot(k)
+if s.attacking < 0:
+    print("En este momento no se sabe quién tiene el balón: elige otro SEGUNDO.")
+else:
+    params = mpc.default_model_params()
+    att, dfn = ("Home", "Away") if s.attacking == 0 else ("Away", "Home")
+    filas = {"Home": tracking_home.loc[k], "Away": tracking_away.loc[k]}
+    gk = {"Home": GK_numbers[0], "Away": GK_numbers[1]}
+    A = mpc.initialise_players(filas[att], att, params, gk[att])
+    D = mpc.initialise_players(filas[dfn], dfn, params, gk[dfn])
+    balon = np.array([tracking_home.loc[k, "ball_x"], tracking_home.loc[k, "ball_y"]])
+    xg, yg = grid(50, (m.pitch_length, m.pitch_width))
+    shaw = np.array([[mpc.calculate_pitch_control_at_target(np.array([x, y]), A, D, balon, params)[0] for x in xg] for y in yg])
+    nuestro = pitch_control(s, offsides=False).values
+    print(f"diferencia máxima con el código de Shaw: {np.abs(shaw - nuestro).max():.1e}")
+'''),
+    md("""
+## 7) SoccerMap: los 13 canales de entrada (para entrenar modelos)
+
+*SoccerMap* (Fernández y Bornn, 2020) es una red neuronal que aprende, a partir de muchos pases, la
+probabilidad de que un pase a cada punto salga bien. Necesita miles de pases etiquetados para
+entrenarse; aquí solo se prepara su entrada: 13 "imágenes" del campo (posiciones y velocidades de los
+dos equipos, distancias y ángulos al balón y a la portería...), orientadas para que el equipo con el
+balón ataque hacia la derecha.
+"""),
+    code('''
+from soccercal.tactics import soccermap_tensor, SOCCERMAP_CHANNELS
+X = soccermap_tensor(m.snapshot(k))
+fig, axs = plt.subplots(3, 5, figsize=(16, 7))
+for ax, ch, nombre in zip(axs.flat, X, SOCCERMAP_CHANNELS):
+    ax.imshow(ch, origin="lower", cmap="viridis"); ax.set_title(nombre, fontsize=8); ax.axis("off")
+for ax in axs.flat[len(X):]:
+    ax.axis("off")
+plt.tight_layout()
 '''),
 ])

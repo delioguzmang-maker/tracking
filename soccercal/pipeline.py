@@ -21,7 +21,7 @@ from .analysis import ANALYSIS_VERSION, Analysis, analyze
 from .ball import ball_timeline, track_ball
 from .cameras import Segment, solve_cameras
 from .config import Config
-from .physical import physical_summary, speeds
+from .physical import physical_summary, velocities
 from .players import TrackingOutput, track_players
 from .teams import OTHER
 from .timeline import EDGE, LONG_GAP, sample_identity
@@ -132,7 +132,9 @@ def build(an: Analysis, cfg: Config | None = None) -> Result:
 
     rows = []
     for ident in trk.identities:
-        s = sample_identity(ident, frame_t, out_t, cfg.extrapolate, cfg.max_extrapolate_s, motion=trk.motion)
+        # coaches and assistant referees stay where they were seen: they do not follow the play
+        s = sample_identity(ident, frame_t, out_t, cfg.extrapolate, cfg.max_extrapolate_s,
+                            motion=trk.motion if ident.role != "staff" else None)
         ok = np.isfinite(s.pos).all(1)
         # no data while the broadcast shows something we cannot calibrate, unless filling is on
         if not cfg.extrapolate:
@@ -144,13 +146,15 @@ def build(an: Analysis, cfg: Config | None = None) -> Result:
             c = cams[near[k]]
             if c is not None and _in_view(c, s.pos[k]):
                 ok[k] = False
-        sp = speeds(out_t, np.where(ok[:, None], s.pos, np.nan))
+        vel = velocities(out_t, np.where(ok[:, None], s.pos, np.nan))
+        sp = np.hypot(vel[:, 0], vel[:, 1])
         team = "A" if ident.team == 0 else "B" if ident.team == 1 else "other"
         num = ident.number if ident.number is not None else -1
         for k in np.nonzero(ok)[0]:
-            rows.append((k, out_t[k], ident.pid, num, team, ident.role, s.pos[k, 0], s.pos[k, 1], bool(s.detected[k]), sp[k]))
+            rows.append((k, out_t[k], ident.pid, num, team, ident.role, s.pos[k, 0], s.pos[k, 1], bool(s.detected[k]), sp[k],
+                         vel[k, 0], vel[k, 1]))
     table = pd.DataFrame(rows, columns=["frame", "t", "player_id", "shirt_number", "team", "role", "x", "y", "is_detected",
-                                       "speed_ms"])
+                                       "speed_ms", "vx", "vy"])
     if len(table):
         table["timestamp"] = table["t"] - t_first + cfg.time_offset_s
         table["speed_kmh"] = table["speed_ms"] * 3.6

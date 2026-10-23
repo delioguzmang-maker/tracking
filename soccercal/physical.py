@@ -8,27 +8,34 @@ from scipy.signal import savgol_filter
 BANDS_KMH = [("walking", 0, 7), ("jogging", 7, 15), ("running", 15, 20), ("hsr", 20, 25), ("sprint", 25, 1e9)]
 
 
-def speeds(t: np.ndarray, xy: np.ndarray, window_s: float = 0.7, vmax: float = 12.0) -> np.ndarray:
-    """Speed (m/s) from positions sampled at a constant rate; NaN where positions are NaN."""
-    out = np.full(len(t), np.nan)
+def velocities(t: np.ndarray, xy: np.ndarray, window_s: float = 0.7, vmax: float = 12.0) -> np.ndarray:
+    """(K, 2) velocity (m/s) from positions sampled at a constant rate; NaN where positions are NaN.
+
+    Savitzky-Golay derivative over each run of known positions. As in Laurie Shaw's
+    ``calc_player_velocities`` (LaurieOnTracking), a step faster than ``vmax`` is a tracking glitch,
+    not a sprint: the run is cut there, and a speed above ``vmax`` is NaN (never clipped to it)."""
+    out = np.full((len(t), 2), np.nan)
     ok = np.isfinite(xy).all(1)
     if ok.sum() < 3:
         return out
     dt = float(np.median(np.diff(t)))
-    # contiguous runs
     idx = np.nonzero(ok)[0]
-    breaks = np.nonzero(np.diff(idx) > 1)[0]
+    step = np.hypot(*np.diff(xy[idx], axis=0).T) / (np.diff(idx) * dt)
+    breaks = np.nonzero((np.diff(idx) > 1) | (step > vmax))[0]
     for run in np.split(idx, breaks + 1):
-        if len(run) < 3:
-            continue
-        w = max(3, int(round(window_s / dt)) | 1)
-        w = min(w, len(run) if len(run) % 2 else len(run) - 1)
+        w = min(max(3, int(round(window_s / dt)) | 1), len(run) if len(run) % 2 else len(run) - 1)
         if w < 3:
             continue
-        vx = savgol_filter(xy[run, 0], w, 2, deriv=1, delta=dt)
-        vy = savgol_filter(xy[run, 1], w, 2, deriv=1, delta=dt)
-        out[run] = np.minimum(np.hypot(vx, vy), vmax)
+        out[run, 0] = savgol_filter(xy[run, 0], w, 2, deriv=1, delta=dt)
+        out[run, 1] = savgol_filter(xy[run, 1], w, 2, deriv=1, delta=dt)
+    out[np.hypot(out[:, 0], out[:, 1]) > vmax] = np.nan
     return out
+
+
+def speeds(t: np.ndarray, xy: np.ndarray, window_s: float = 0.7, vmax: float = 12.0) -> np.ndarray:
+    """Speed (m/s), see ``velocities``."""
+    v = velocities(t, xy, window_s, vmax)
+    return np.hypot(v[:, 0], v[:, 1])
 
 
 def _efforts(v_kmh: np.ndarray, thr: float, dt: float, min_s: float = 1.0) -> int:

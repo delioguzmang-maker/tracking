@@ -25,7 +25,7 @@ que hace falta para llegar a datos de tracking.
 |---|---|
 | `1_tracking_extrapolated.jsonl` | **formato SkillCorner**: un fotograma cada 0,1 s con `player_data` (x, y, player_id, is_detected), `ball_data`, `possession`, `image_corners_projection` |
 | `1_match.json` | **formato SkillCorner**: equipos, color de camiseta estimado, plantilla (identidades), portero, tamaño del campo |
-| `tracking.csv` | lo mismo en tabla: `frame, timestamp, player_id, shirt_number, team, role, x, y, is_detected, speed_kmh` |
+| `tracking.csv` | lo mismo en tabla: `frame, timestamp, player_id, shirt_number, team, role, x, y, is_detected, speed_kmh, vx, vy` (velocidad en m/s) |
 | `ball.csv` | el balón a 10 fps: `x, y, is_detected, kind` (`detected` visto, `interpolated` entre dos detecciones, `carried` en los pies de quien lo lleva) y la posesión |
 | `physical.csv` | por jugador: distancia total y por bandas (andar, trotar, correr, HSR 20–25 km/h, sprint >25), velocidad máxima, PSV-99, nº de esfuerzos |
 | `cameras.csv` | la cámara en cada fotograma: pan, inclinación, zoom, posición, calidad |
@@ -355,10 +355,49 @@ intercambiaban a mitad de clip y salían con el color equivocado).
 * Dorsales leídos: 2, 6, 9, 10, 17 y 27 del Bayern y 25 del PSG (todos correctos).
 * La calibración cae sobre las líneas reales en todo el clip (círculo central, área, portería).
 
+**Velocidad falsa por el movimiento de la cámara** (Bayern–PSG): el entrenador que está quieto en la
+banda, mientras la cámara lo ve y gira hasta 7°/s, sale con 0,3 m/s de mediana y 0,49 m/s como máximo
+(posición estable a ±0,3 m). La cámara se calcula en cada fotograma (red cada 5 + registro entre medias),
+no se reutiliza la del fotograma calibrado más cercano, que es lo que provoca saltos de casi un metro
+y velocidades falsas de 4–7 m/s en otros sistemas. En el control del espacio, 0,49 m/s de error mueven
+el punto de reacción de un jugador como mucho 0,35 m (× 0,7 s).
+
 Formato verificado: `tests/test_export.py` carga la salida con kloppy, y el visor oficial
 `SkillCorner_Tracking_Viewer.html` la abre sin errores (probado en Chromium: 26 identidades, 61 fotogramas, 10 Hz, portero y posesión).
 
 ---
+
+## Análisis táctico: control del espacio y valor (cuaderno `02_analisis`)
+
+Con las posiciones y velocidades se calculan los modelos clásicos de la analítica de fútbol
+(`soccercal/tactics.py`). Funcionan sobre los archivos SkillCorner, así que sirven igual con nuestra
+salida y con los datos abiertos de SkillCorner:
+
+```python
+from soccercal.tactics import Match, plot_control
+m = Match.load("salida")          # o Match.from_result(res)
+plot_control(m, 56, model="spearman")   # "fernandez", "value"
+```
+
+| función | qué calcula | de dónde viene |
+|---|---|---|
+| `pitch_control` | probabilidad de que el equipo con el balón lo gane si se juega a cada punto | modelo de William Spearman (2018) con el código de Laurie Shaw (LaurieOnTracking, *Friends of Tracking*): mismos parámetros y ecuaciones. Comprobado contra su código original en el Bayern–PSG: **diferencia máxima 1·10⁻¹⁵**, y 34 veces más rápido (38 ms frente a 1,3 s por fotograma) porque calcula todo el campo a la vez. El fuera de juego (`offsides=True`, como Shaw) da los mismos jugadores que su `check_offsides` en los 83 fotogramas probados |
+| `space_control` | control del espacio por "zonas de influencia" gaussianas, adelantadas 0,5 s y estiradas en la dirección de carrera, más grandes lejos del balón | Fernández y Bornn, *Wide Open Spaces* (2018). Coincide con una implementación independiente (diferencia 4·10⁻¹⁶) |
+| `value_map`, `epv_at` | control × EPV: dónde un pase sería a la vez seguro y peligroso | superficie EPV de Laurie Shaw (`soccercal/data/EPV_grid.csv`, licencia MIT) |
+| `control_series` | % del campo (y de lo que ve la cámara) que controla cada equipo en el tiempo | |
+| `render_control_video` | vídeo del mapa de control, un fotograma cada 0,1 s | |
+| `to_metrica` | tablas `tracking_home` / `tracking_away` del formato de los tutoriales de Laurie Shaw (`Home_7_x`, `Home_7_vx`, ...) y los porteros, para usar su código tal cual | |
+| `soccermap_tensor` | los 13 canales de entrada de SoccerMap (Fernández y Bornn, 2020), para quien quiera entrenar el modelo | canales densos como en un-xPass (KU Leuven) |
+
+Las velocidades (`vx, vy`) se calculan como en Laurie Shaw: un salto de más de 12 m/s es un error de
+seguimiento, no un sprint, y no se cuenta (antes se recortaba a 12 m/s y podía sumar un sprint falso).
+
+**Límite de la retransmisión:** la cámara solo ve una parte del campo. Los jugadores fuera de cámara
+tienen posición estimada y un jugador que el vídeo no muestra nunca (a menudo un portero) falta. En los
+mapas esa zona sale en gris; `control_series` da también el porcentaje solo dentro de la cámara, que es
+el fiable. En el Bayern–PSG se ve bien: hasta el segundo 7 las dos medidas coinciden; a partir del 10,
+con la jugada en una banda, "todo el campo" da al equipo A un 20–35 % y "dentro de la cámara" un 65–80 %.
+La diferencia la ponen las zonas que la cámara no ve.
 
 ## En qué se parece a SkillCorner y en qué no (honestamente)
 
@@ -395,7 +434,7 @@ Diferente / pendiente:
 ## Para desarrolladores
 
 ```bash
-pytest -q                                  # 35 pruebas, ~30 s, no necesitan pesos
+pytest -q                                  # 57 pruebas, ~30 s, no necesitan pesos
 python tools/synthetic_benchmark.py        # seguimiento con verdad conocida
 python tools/calibration_benchmark.py      # calibración en el clip real
 python tools/make_notebooks.py             # regenera los cuadernos
@@ -404,7 +443,8 @@ python tools/make_notebooks.py             # regenera los cuadernos
 Código en `soccercal/`: `hrnet.py` (red), `field_model.py` (puntos del campo), `camera.py` /
 `calibrate.py` / `lines.py` (calibración), `camtrack.py` / `cameras.py` (cámara en el tiempo),
 `detect.py`, `tracker.py`, `stitch.py`, `teams.py`, `players.py` (jugadores), `timeline.py`,
-`ball.py`, `physical.py`, `skillcorner.py` (salida), `viz.py`, `pipeline.py`, `cli.py`.
+`ball.py`, `physical.py`, `skillcorner.py` (salida), `tactics.py` (control del espacio, EPV),
+`viz.py`, `pipeline.py`, `cli.py`.
 
 ## Créditos y licencias
 
@@ -414,3 +454,9 @@ Código en `soccercal/`: `hrnet.py` (red), `field_model.py` (puntos del campo), 
 * Detector: Ultralytics YOLO11 (AGPL-3.0).
 * Clip de ejemplo: repositorio de NBJW. Trayectorias del banco sintético: Metrica Sports sample data.
 * Formato y visor: SkillCorner open data.
+* Control del espacio: modelo de William Spearman (2018) según la implementación de Laurie Shaw en
+  LaurieOnTracking (Friends of Tracking, MIT); superficie EPV `soccercal/data/EPV_grid.csv` de ese mismo
+  repositorio (MIT, © 2021 Friends-of-Tracking-Data-FoTD). Influencia de J. Fernández y L. Bornn,
+  *Wide Open Spaces* (MIT Sloan 2018); entrada de SoccerMap (Fernández y Bornn, ECML-PKDD 2020), canales
+  densos como en un-xPass (DTAI, KU Leuven). El código de `tactics.py` está escrito desde los artículos y
+  comprobado contra esas implementaciones, no copiado.
