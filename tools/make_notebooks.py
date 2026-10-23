@@ -171,7 +171,20 @@ plot_frame(res, k=30);
 res.physical.round(1)
 '''),
     md("""
-## 7) Formato SkillCorner
+## 7) Control del espacio
+Para cada punto del campo, la probabilidad de que el equipo con el balón lo gane si el balón se juega
+ahí (modelo de Spearman con el código de Laurie Shaw). Color de un equipo = lo ganaría ese equipo,
+blanco = 50/50, flechas = dónde estará cada jugador en 1 s, gris = zona que la cámara no ve (posiciones
+estimadas). Más modelos y el vídeo en el cuaderno `02_analisis`.
+"""),
+    code('''
+from soccercal.tactics import Match, plot_control
+m = Match.from_result(res)
+SEGUNDO = 5.6                     # cambia el momento
+plot_control(m, int(round(SEGUNDO * m.fps)), model="spearman");
+'''),
+    md("""
+## 8) Formato SkillCorner
 En `salida_demo/` están `1_match.json` y `1_tracking_extrapolated.jsonl`, el mismo formato que los
 datos abiertos de SkillCorner. Se pueden abrir con su visor (`SkillCorner_Tracking_Viewer.html` del
 repositorio `SkillCorner/opendata`) o con **kloppy**, la librería estándar de datos de fútbol:
@@ -301,7 +314,19 @@ igual para datos reales de SkillCorner, porque el formato es el mismo.
     code('''
 import pandas as pd, numpy as np, matplotlib.pyplot as plt
 from soccercal import pitch
-CARPETA = "salida_demo"
+CARPETA = "salida_demo"   # la carpeta de salida de 00 o 01
+if not os.path.exists(f"{CARPETA}/tracking.csv") and EN_COLAB:
+    # En Colab cada cuaderno tiene su propia máquina: sube el zip que descargaste al final del 00 / 01.
+    print("Sube el .zip de resultados (por ejemplo salida_demo.zip). Si cancelas, se usa el clip de ejemplo.")
+    import zipfile
+    from google.colab import files
+    try:
+        subidos = files.upload()
+    except Exception:
+        subidos = {}
+    for nombre in subidos:
+        if nombre.endswith(".zip"):
+            zipfile.ZipFile(nombre).extractall(CARPETA)
 if not os.path.exists(f"{CARPETA}/tracking.csv"):
     import soccercal
     soccercal.run(soccercal.get_sample_video(), CARPETA, render=False)
