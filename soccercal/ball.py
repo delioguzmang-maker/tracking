@@ -15,8 +15,10 @@ white boots, heads and advertising letters often score higher. So:
    false positives are ignored and weak true detections are kept when they continue
    a trajectory;
 4. a candidate at a player's feet is either the ball being dribbled or a white boot.
-   It may only *bridge* two clean detections of the same tracklet (a dribble), never
-   start or end one, so boots cannot create a trajectory of their own;
+   It may only *bridge* two clean detections of the same tracklet (a dribble), or end a
+   tracklet where the moving ball was predicted to be (a pass reaching its receiver), never
+   start one, so boots cannot create a trajectory of their own; a dribble chain must also
+   agree with the direction of a fast ball (a pass cannot turn back on its own);
 5. short gaps are interpolated (``is_detected`` stays False there).
 
 The ground projection is exact only for a ball on the grass; aerial balls give
@@ -118,12 +120,18 @@ def _ball_tracklets(C, t, fps, vmax, max_miss_s):
     return tracks + active
 
 
-def _trim(tr: dict) -> dict | None:
-    """Cut a tracklet to its first..last clean (not at-feet) detection; None if it has none."""
+def _trim(tr: dict, t: np.ndarray | None = None, tail_s: float = 0.5) -> dict | None:
+    """Cut a tracklet to its first clean (not at-feet) detection; None if it has none. At-feet
+    detections after the last clean one are kept for ``tail_s`` (the tracklet predicted them
+    from the ball's velocity: a pass arriving at the receiver's feet), later ones are cut."""
     clean = np.nonzero(~np.array(tr["feet"]))[0]
     if len(clean) == 0:
         return None
     a, b = clean[0], clean[-1] + 1
+    if t is not None:
+        f = np.asarray(tr["frames"])
+        while b < len(f) and t[f[b]] - t[f[clean[-1]]] <= tail_s:
+            b += 1
     out = {k: tr[k][a:b] for k in ("frames", "pos", "e", "feet")}
     out["score"] = float(np.sum(out["e"]))
     return out
@@ -143,7 +151,8 @@ def track_ball(an: Analysis, cams: list, ball_conf: float = 0.03, vmax: float = 
     t = np.array([fd.t for fd in an.frames])
     C = [candidates(fd, c, ball_conf) for fd, c in zip(an.frames, cams)]
     raw = _ball_tracklets(C, t, fps, vmax, max_miss_s)
-    trs = [tr for tr in map(_trim, raw) if tr is not None and tr["score"] - restart_cost > 0 and len(tr["frames"]) >= 2]
+    trs = [tr for tr in (_trim(r, t) for r in raw) if tr is not None and tr["score"] - restart_cost > 0
+           and len(tr["frames"]) >= 2]
     trs.sort(key=lambda tr: tr["frames"][-1])
     ends = [tr["frames"][-1] for tr in trs]
     best = np.zeros(len(trs) + 1)
@@ -178,12 +187,14 @@ def track_ball(an: Analysis, cams: list, ball_conf: float = 0.03, vmax: float = 
 
 
 def _dribbles(raw: list, pos: np.ndarray, det: np.ndarray, t: np.ndarray, min_s: float = 0.3, near_s: float = 1.5,
-              far_s: float = 3.0, reach: float = 3.0, speed: float = 12.0) -> None:
+              far_s: float = 3.0, reach: float = 3.0, speed: float = 12.0, fast: float = 7.0) -> None:
     """Fill gaps of the chosen trajectory with chains of at-feet candidates (a player dribbling:
     the detector only sees the ball next to his boots). A chain is accepted only if it connects
     to the known ball: where the ball is known on both sides (within ``far_s``), both ends must
     be reachable from it; at the edge of the known trajectory, the one side must be and the
-    chain must last ``min_s``. A white boot of some other player does not connect."""
+    chain must last ``min_s``. A white boot of some other player does not connect. When the
+    known ball was moving faster than ``fast`` (a pass), it can only have been stopped or
+    deflected somewhere on its path, so the chain must start (end) within ``reach`` of that path."""
     feet_only = [tr for tr in raw if all(tr["feet"]) and len(tr["frames"]) >= 3
                  and t[tr["frames"][-1]] - t[tr["frames"][0]] >= min_s and tr["score"] / len(tr["frames"]) > -0.2]
     for tr in sorted(feet_only, key=lambda tr: -len(tr["frames"])):
@@ -197,11 +208,27 @@ def _dribbles(raw: list, pos: np.ndarray, det: np.ndarray, t: np.ndarray, min_s:
         if a is None and b is None:
             continue
 
-        def joins(p, q, dt):
-            return dt <= near_s and np.linalg.norm(np.asarray(p) - q) <= reach + speed * dt
+        def velocity(k, step):  # of the known ball at k, from the detections before (step -1) / after (+1)
+            j = k + step
+            while 0 <= j < len(det) and not det[j] and abs(t[j] - t[k]) < 0.3:
+                j += step
+            if not (0 <= j < len(det)) or not det[j] or abs(t[j] - t[k]) > 0.3:
+                return None
+            return (pos[k] - pos[j]) / (t[k] - t[j])
 
-        ok_a = a is not None and joins(tr["pos"][0], pos[a], t[f0] - t[a])
-        ok_b = b is not None and joins(tr["pos"][-1], pos[b], t[b] - t[f1])
+        def joins(p, q, dt, v):
+            p = np.asarray(p)
+            if dt > near_s:
+                return False
+            if v is not None and np.linalg.norm(v) > fast:  # a pass: only on its path
+                seg = v * dt
+                s = np.clip(np.dot(p - q, seg) / max(np.dot(seg, seg), 1e-9), 0, 1)
+                return np.linalg.norm(p - (q + s * seg)) <= reach
+            return np.linalg.norm(p - q) <= reach + speed * dt
+
+        ok_a = a is not None and joins(tr["pos"][0], pos[a], t[f0] - t[a], velocity(a, -1))
+        vb = velocity(b, +1) if b is not None else None  # the path leading to b goes back along -v
+        ok_b = b is not None and joins(tr["pos"][-1], pos[b], t[b] - t[f1], None if vb is None else -vb)
         if (a is not None and not ok_a) or (b is not None and not ok_b):
             continue
         for f, p in zip(tr["frames"], tr["pos"]):

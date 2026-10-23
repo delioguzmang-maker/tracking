@@ -77,6 +77,7 @@ class Match:
     names: tuple = ("home", "away")
     colors: tuple = ("#d62728", "#1f4fb4")
     fps: float = 10.0
+    numbers: dict = field(default_factory=dict)  # player id -> shirt number (when known)
 
     # ---------------------------------------------------------------- loading
     @classmethod
@@ -126,7 +127,8 @@ class Match:
         return cls(tab, ball, views, float(meta.get("pitch_length") or 105.0), float(meta.get("pitch_width") or 68.0),
                    list(meta.get("home_team_side") or ["left_to_right", "right_to_left"]),
                    (meta["home_team"].get("short_name") or "home", meta["away_team"].get("short_name") or "away"),
-                   (hex_(meta.get("home_team_kit"), "#d62728"), hex_(meta.get("away_team_kit"), "#1f4fb4")), fps)
+                   (hex_(meta.get("home_team_kit"), "#d62728"), hex_(meta.get("away_team_kit"), "#1f4fb4")), fps,
+                   {p["id"]: p["number"] for p in meta.get("players", []) if p.get("number") is not None})
 
     @classmethod
     def load(cls, folder: str | Path) -> "Match":
@@ -539,14 +541,18 @@ def draw_pitch(ax, length: float = 105.0, width: float = 68.0, color: str = "#88
     return ax
 
 
+BALL_COLOR = "#ffd400"  # yellow, as on the verification video's minimap
+
+
 def plot_control(match: Match, frame: int, model: str = "spearman", ax=None, n_grid_cells_x: int | None = None,
-                 show_view: bool = True, arrows: bool = True):
+                 show_view: bool = True, arrows: bool = True, labels: bool = True):
     """Map of who controls the space at ``frame``. ``model``: ``"spearman"`` (Spearman / Shaw),
     ``"fernandez"`` (Fernández & Bornn) or ``"value"`` (Spearman x EPV of the team in possession).
 
-    Colour = team that would win a ball played there (white = 50/50). Filled dots = seen by the
-    camera, white centre = estimated; arrows = where each player will be in 1 s; grey = outside the
-    camera view (positions there are estimated)."""
+    Colour = team that would win a ball played there (white = 50/50). Solid dots = seen by the
+    camera, see-through with a dashed outline = estimated; yellow = the ball; arrows = where each
+    player will be in 1 s; grey = outside the camera view (positions there are estimated). Labels:
+    shirt number when read, else the track id."""
     import matplotlib.pyplot as plt
 
     s = match.snapshot(int(frame))
@@ -585,22 +591,35 @@ def plot_control(match: Match, frame: int, model: str = "spearman", ax=None, n_g
         rgba[out] = (0.55, 0.55, 0.55, 0.55)
         ax.imshow(rgba, extent=ext, origin="lower", zorder=3, interpolation="nearest")
         ax.plot(*np.vstack([s.view, s.view[:1]]).T, ls="--", c="#333333", lw=0.8, zorder=4)
+    import matplotlib.patheffects as pe
+    from matplotlib.colors import to_rgba
+    from matplotlib.lines import Line2D
+
     for t in (0, 1):
         m = s.team == t
-        for det in (True, False):
+        for det in (True, False):  # seen: solid; estimated (off camera): see-through, dashed outline
             mm = m & (s.detected == det)
-            if not det:  # thin black ring so the team colour shows on any background
-                ax.scatter(s.pos[mm, 0], s.pos[mm, 1], s=120, zorder=6, facecolors="none", edgecolors="k", linewidths=0.8)
-            ax.scatter(s.pos[mm, 0], s.pos[mm, 1], s=70, zorder=6, linewidths=1.2 if det else 2.6,
-                       facecolors=cols[t] if det else "white", edgecolors="k" if det else cols[t])
+            ax.scatter(s.pos[mm, 0], s.pos[mm, 1], s=80, zorder=6, linewidths=1.2,
+                       facecolors=cols[t] if det else to_rgba(cols[t], 0.4), edgecolors="k",
+                       linestyles="-" if det else (0, (2, 1.5)))
         if arrows and m.any():
             ax.quiver(s.pos[m, 0], s.pos[m, 1], s.vel[m, 0], s.vel[m, 1], angles="xy", scale_units="xy", scale=1,
                       color=cols[t], width=0.003, zorder=5)
-    if np.isfinite(s.ball).all():
-        ax.scatter(*s.ball, s=45, c="white", edgecolors="k", linewidths=1.2, zorder=7)
+    if labels:
+        for pid, xy in zip(s.pid, s.pos):
+            num = match.numbers.get(int(pid))
+            ax.text(xy[0] + 1.2, xy[1] + 1.2, f"{num}" if num is not None else f"id{pid}", fontsize=7, color="white",
+                    zorder=7, path_effects=[pe.withStroke(linewidth=2, foreground="k")])
     car = s.pid == s.carrier
     if car.any():
-        ax.scatter(*s.pos[car][0], s=260, facecolors="none", edgecolors="k", linewidths=1.0, zorder=6)
+        ax.scatter(*s.pos[car][0], s=280, facecolors="none", edgecolors="k", linewidths=1.2, zorder=6)
+    if np.isfinite(s.ball).all():
+        ax.scatter(*s.ball, s=32, c=BALL_COLOR, edgecolors="k", linewidths=1.0, zorder=8)
+    handles = [Line2D([], [], ls="", marker="o", ms=8, mfc=cols[0], mec="k", label="visto por la cámara"),
+               Line2D([], [], ls="", marker="o", ms=8, mfc=to_rgba(cols[0], 0.4), mec="k", label="estimado (fuera de cámara)"),
+               Line2D([], [], ls="", marker="o", ms=6, mfc=BALL_COLOR, mec="k", label="balón"),
+               Line2D([], [], ls="", marker="o", ms=13, mfc="none", mec="k", label="tiene el balón")]
+    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.0), ncol=4, fontsize=8, frameon=False)
     n0, n1 = int((s.team == 0).sum()), int((s.team == 1).sum())
     name = {"spearman": "Spearman / Shaw", "fernandez": "Fernández & Bornn", "value": "Spearman x EPV"}.get(model, model)
     ttl = (f"{name}  ·  t = {frame / match.fps:.1f} s  ·  posesión: "
@@ -610,7 +629,7 @@ def plot_control(match: Match, frame: int, model: str = "spearman", ax=None, n_g
     cb = plt.colorbar(im, ax=ax, fraction=0.025, pad=0.01)
     cb.set_label(label, fontsize=9)
     if sf.notes:
-        ax.text(-L / 2, -W / 2 - 2.5, "; ".join(sf.notes), fontsize=8, va="top")
+        ax.text(-L / 2, W / 2 + 1.0, "; ".join(sf.notes), fontsize=8, va="bottom")
     return ax
 
 

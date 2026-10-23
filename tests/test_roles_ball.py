@@ -231,6 +231,28 @@ def test_dribble_chain_bridges_only_when_it_connects():
     assert det[12:38].all() and np.allclose(pos[20], [4.0, 0.3])
 
 
+def test_pass_does_not_turn_back_onto_a_boot():
+    """Bayern-PSG 5.2 s: a pass at 9 m/s, then a boot 5 m *behind* the ball. The boot chain must not
+    continue the ball (a pass only changes direction where something on its path touches it), and
+    the at-feet detection where the pass was going (the receiver) must end the trajectory."""
+    from soccercal.ball import _dribbles, _trim
+    t = np.arange(80) / 30.0
+    pos = np.full((80, 2), np.nan)
+    det = np.zeros(80, bool)
+    for k in range(0, 12):  # the pass: clean detections at 9 m/s towards +x
+        pos[k], det[k] = [-5.0 + 9.0 * t[k], -3.0], True
+    boot = {"frames": list(range(19, 30)), "pos": [np.array([-6.1, -2.9])] * 11, "e": [-0.03] * 11,
+            "feet": [True] * 11, "score": -0.3}
+    for k in range(70, 75):  # the ball seen again later, further on
+        pos[k], det[k] = [3.0, -2.0], True
+    _dribbles([boot], pos, det, t)
+    assert not det[19:30].any()
+    # the tracklet that followed the pass keeps its last at-feet points (within 0.5 s)
+    tr = {"frames": list(range(0, 16)), "pos": [np.array([-5.0 + 9.0 * t[k], -3.0]) for k in range(16)],
+          "e": [1.0] * 12 + [0.2] * 4, "feet": [False] * 12 + [True] * 4, "score": 12.8}
+    assert len(_trim(tr, t)["frames"]) == 16 and len(_trim(tr)["frames"]) == 12
+
+
 def test_video_from_drive_finds_by_name(tmp_path, monkeypatch):
     import os
     from soccercal import weights
