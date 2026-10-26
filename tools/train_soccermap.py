@@ -206,8 +206,15 @@ def main():
     dl = torch.utils.data.DataLoader(PassData(part["train"], flip=True), batch_size=a.batch, shuffle=True, num_workers=2,
                                      drop_last=True, persistent_workers=True)
     yv = np.array([r["y"] for r in part["val"]], float)
-    best, best_state, bad, history = np.inf, None, 0, []
-    for ep in range(a.epochs):
+    best, best_state, bad, history, first = np.inf, None, 0, [], 0
+    ckpt = root / "soccermap_ckpt.pt"  # resume after an interruption
+    if ckpt.exists():
+        c = torch.load(ckpt, weights_only=False)
+        net.load_state_dict(c["model"])
+        opt.load_state_dict(c["opt"])
+        best, best_state, bad, history, first = c["best"], c["best_state"], c["bad"], c["history"], c["epoch"]
+        print(f"resuming after epoch {first}", flush=True)
+    for ep in range(first, a.epochs if bad < a.patience else first):
         net.train()
         t0, tot, n = time.time(), 0.0, 0
         for X, iy, ix, y in dl:
@@ -216,7 +223,7 @@ def main():
             opt.zero_grad()
             loss.backward()
             opt.step()
-            tot, n = tot + float(loss) * len(y), n + len(y)
+            tot, n = tot + float(loss.detach()) * len(y), n + len(y)
         mv = metrics(predict(net, part["val"]), yv)
         history.append({"epoch": ep + 1, "train_log_loss": round(tot / n, 4), **{f"val_{k}": v for k, v in mv.items()}})
         print(f"epoch {ep + 1}: train {tot / n:.4f}, validation {mv} ({time.time() - t0:.0f} s)", flush=True)
@@ -226,8 +233,10 @@ def main():
             torch.save({"model": {k: v.half() for k, v in best_state.items()}, "report": {"partial": history}}, a.out)
         else:
             bad += 1
-            if bad >= a.patience:
-                break
+        torch.save({"model": net.state_dict(), "opt": opt.state_dict(), "best": best, "best_state": best_state,
+                    "bad": bad, "history": history, "epoch": ep + 1}, ckpt)
+        if bad >= a.patience:
+            break
     net.load_state_dict(best_state)
     yt = np.array([r["y"] for r in part["test"]], float)
     p_sm = predict(net, part["test"])

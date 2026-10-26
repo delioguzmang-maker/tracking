@@ -64,6 +64,7 @@ class Snapshot:
     view: np.ndarray | None  # (k, 2) polygon of the pitch the camera sees
     attacks_right: tuple  # (team 0, team 1): attacks towards +x?
     pitch: tuple = (105.0, 68.0)
+    imputed: np.ndarray | None = None  # (n,) bool: never seen in the clip, placed by ``impute.complete``
 
 
 @dataclass
@@ -171,11 +172,12 @@ class Match:
         att = int(poss["possession_team"].iloc[-1]) if len(poss) else -1
         carrier = int(poss["possession_player_id"].iloc[-1]) if len(poss) else -1
         vel = np.nan_to_num(g[["vx", "vy"]].values.astype(float))
+        imp = g["imputed"].values.astype(bool) if "imputed" in g else np.zeros(len(g), bool)
         return Snapshot(int(frame), period, g[["x", "y"]].values.astype(float), vel, g["team"].values.astype(int),
                         g["gk"].values.astype(bool), g["is_detected"].values.astype(bool), g["player_id"].values,
                         ball, att, carrier, self.views.get(int(frame)),
                         (self.attacks_right(0, period), self.attacks_right(1, period)),
-                        (self.pitch_length, self.pitch_width))
+                        (self.pitch_length, self.pitch_width), imp)
 
 
 @dataclass
@@ -605,18 +607,23 @@ def plot_control(match: Match, frame: int, model: str = "spearman", ax=None, n_g
 
     for t in (0, 1):
         m = s.team == t
+        imp = s.imputed if s.imputed is not None else np.zeros(len(s.pid), bool)
         for det in (True, False):  # seen: solid; estimated (off camera): see-through, dashed outline
-            mm = m & (s.detected == det)
+            mm = m & (s.detected == det) & ~imp
             ax.scatter(s.pos[mm, 0], s.pos[mm, 1], s=80, zorder=6, linewidths=1.2,
                        facecolors=cols[t] if det else to_rgba(cols[t], 0.4), edgecolors="k",
                        linestyles="-" if det else (0, (2, 1.5)))
+        mm = m & imp  # never seen in the clip: faint, dotted, "?"
+        ax.scatter(s.pos[mm, 0], s.pos[mm, 1], s=80, zorder=6, linewidths=1.2, facecolors=to_rgba(cols[t], 0.15),
+                   edgecolors=cols[t], linestyles=(0, (1, 1.5)))
         if arrows and m.any():
             ax.quiver(s.pos[m, 0], s.pos[m, 1], s.vel[m, 0], s.vel[m, 1], angles="xy", scale_units="xy", scale=1,
                       color=cols[t], width=0.003, zorder=5)
     if labels:
         for pid, xy in zip(s.pid, s.pos):
             num = match.numbers.get(int(pid))
-            ax.text(xy[0] + 1.2, xy[1] + 1.2, f"{num}" if num is not None else f"id{pid}", fontsize=7, color="white",
+            txt = "?" if pid < 0 else f"{num}" if num is not None else f"id{pid}"
+            ax.text(xy[0] + 1.2, xy[1] + 1.2, txt, fontsize=7, color="white",
                     zorder=7, path_effects=[pe.withStroke(linewidth=2, foreground="k")])
     car = s.pid == s.carrier
     if car.any():
@@ -627,7 +634,11 @@ def plot_control(match: Match, frame: int, model: str = "spearman", ax=None, n_g
                Line2D([], [], ls="", marker="o", ms=8, mfc=to_rgba(cols[0], 0.4), mec="k", label="estimado (fuera de cámara)"),
                Line2D([], [], ls="", marker="o", ms=6, mfc=BALL_COLOR, mec="k", label="balón"),
                Line2D([], [], ls="", marker="o", ms=13, mfc="none", mec="k", label="tiene el balón")]
-    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.0), ncol=4, fontsize=8, frameon=False)
+    if s.imputed is not None and s.imputed.any():
+        handles.insert(2, Line2D([], [], ls=":", marker="o", ms=8, mfc=to_rgba(cols[0], 0.15), mec=cols[0],
+                                 label="? = no sale en el vídeo (deducido)"))
+    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.0), ncol=len(handles), fontsize=8,
+              frameon=False)
     n0, n1 = int((s.team == 0).sum()), int((s.team == 1).sum())
     name = {"spearman": "Spearman / Shaw", "fernandez": "Fernández & Bornn", "value": "Spearman x EPV"}.get(model, model)
     ttl = (f"{name}  ·  t = {frame / match.fps:.1f} s  ·  posesión: "

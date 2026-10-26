@@ -123,7 +123,7 @@ def complete(match: Match, players_per_team: int = 11, min_seen_frac: float = 0.
                 if v is None or len(v) < 5:
                     continue
                 per = int(v["period"].iloc[0])
-                sgn = -1.0 if match.attacks_right(team, per) else 1.0  # team defending -x
+                sgn = 1.0 if match.attacks_right(team, per) else -1.0  # attacking +x = defending the -x goal
                 P = v[["x", "y"]].values * sgn
                 b = match.ball.loc[k] if k in match.ball.index else None
                 ball = np.array([b["x"], b["y"]]) * sgn if b is not None and np.isfinite([b["x"], b["y"]]).all() else P.mean(0)

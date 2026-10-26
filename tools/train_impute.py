@@ -39,7 +39,9 @@ def team_halves(m):
             continue
         piv_x = of[of["player_id"].isin(top)].pivot_table(index="frame", columns="player_id", values="x")
         piv_y = of[of["player_id"].isin(top)].pivot_table(index="frame", columns="player_id", values="y")
-        ok = piv_x.notna().all(1) & piv_y.notna().all(1)
+        ok = piv_x.notna().all(axis=1) & piv_y.notna().all(axis=1)
+        if ok.sum() < 300:  # under 30 s with the same ten players: no usable shape
+            continue
         P = np.stack([piv_x[ok].values, piv_y[ok].values], -1) * sgn  # (T, 10, 2)
         det = None
         if "is_detected" in of:
@@ -74,7 +76,7 @@ def gk_samples(m, every: int = 10):
             of = g[(g["team"] == team) & ~g["gk"]]
             if len(gk) != 1 or len(of) < 8 or ("is_detected" in gk and not bool(gk["is_detected"].iloc[0])):
                 continue
-            sgn = -1.0 if m.attacks_right(team, per) else 1.0  # defending -x
+            sgn = 1.0 if m.attacks_right(team, per) else -1.0  # attacking +x = defending the -x goal
             P = of[["x", "y"]].values * sgn
             if b is None or not np.isfinite([b["x"], b["y"]]).all():
                 continue
