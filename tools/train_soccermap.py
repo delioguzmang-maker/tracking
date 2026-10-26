@@ -1,7 +1,8 @@
 """Train SoccerMap's pass-success surface on open tracking + event data (see ``tools/open_data.py``).
 
     python tools/open_data.py --cache open_data
-    python tools/train_soccermap.py --cache open_data
+    python tools/statsbomb_passes.py --cache open_data          # optional, many more passes
+    python tools/train_soccermap.py --cache open_data --extra open_data/statsbomb_samples.pkl
 
 Matches (not passes) are split into train / validation / test, so the test score is on games the
 network never saw. Baselines as in the paper: Naive (the average completion rate) and a logistic
@@ -171,13 +172,64 @@ def split_matches(recs, seed: int) -> dict:
     return part
 
 
+def run_phase(name: str, net, train, val, lr: float, rounds: int, round_batches: int | None, patience: int, root: Path,
+              out: str, batch: int, history: list):
+    """Adam with the learning rate cut by 3 when the validation log-loss stops improving; keeps the
+    best model; checkpointed after every round (``round_batches`` batches, default one epoch), so
+    an interrupted run resumes."""
+    opt = torch.optim.Adam(net.parameters(), lr=lr)
+    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, factor=0.3, patience=1)
+    n = round_batches * batch if round_batches else len(train) // batch * batch
+    dl = torch.utils.data.DataLoader(PassData(train, flip=True), batch_size=batch, num_workers=2, drop_last=True,
+                                     persistent_workers=True,
+                                     sampler=torch.utils.data.RandomSampler(train, replacement=bool(round_batches),
+                                                                            num_samples=n))
+    yv = np.array([r["y"] for r in val], float)
+    best, best_state, bad, first = np.inf, None, 0, 0
+    ckpt = root / f"soccermap_ckpt_{name}.pt"
+    if ckpt.exists():
+        c = torch.load(ckpt, weights_only=False)
+        net.load_state_dict(c["model"])
+        opt.load_state_dict(c["opt"])
+        sched.load_state_dict(c["sched"])
+        best, best_state, bad, first = c["best"], c["best_state"], c["bad"], c["round"]
+        history[:] = c["history"]
+        print(f"{name}: resuming after round {first}", flush=True)
+    for rnd in range(first, rounds if bad < patience else first):
+        net.train()
+        t0, tot, k = time.time(), 0.0, 0
+        for X, iy, ix, y in dl:
+            z = net(X.to(memory_format=torch.channels_last))[:, 0]
+            loss = F.binary_cross_entropy_with_logits(z[torch.arange(len(iy)), iy, ix], y.float())
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            tot, k = tot + float(loss.detach()) * len(y), k + len(y)
+        mv = metrics(predict(net, val), yv)
+        sched.step(mv["log_loss"])
+        history.append({"phase": name, "round": rnd + 1, "lr": opt.param_groups[0]["lr"], "train_log_loss": round(tot / k, 4),
+                        **{f"val_{key}": v for key, v in mv.items()}})
+        print(f"{name} round {rnd + 1}: train {tot / k:.4f}, validation {mv}, lr {opt.param_groups[0]['lr']:.1e} "
+              f"({time.time() - t0:.0f} s)", flush=True)
+        if mv["log_loss"] < best - 1e-3:
+            best, bad = mv["log_loss"], 0
+            best_state = {key: v.detach().clone() for key, v in net.state_dict().items()}
+            torch.save({"model": {key: v.half() for key, v in best_state.items()}, "report": {"partial": history}}, out)
+        else:
+            bad += 1
+        torch.save({"model": net.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(), "best": best,
+                    "best_state": best_state, "bad": bad, "history": history, "round": rnd + 1}, ckpt)
+        if bad >= patience:
+            break
+    net.load_state_dict(best_state)
+    return best
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache", default="open_data")
-    ap.add_argument("--epochs", type=int, default=25)
+    ap.add_argument("--extra", default=None, help="extra passes (tools/statsbomb_passes.py) for a first phase")
     ap.add_argument("--batch", type=int, default=32)
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--patience", type=int, default=4)
     ap.add_argument("--threads", type=int, default=3)
     ap.add_argument("--out", default=str(Path(__file__).resolve().parents[1] / "soccercal" / "data" / "soccermap_pass_success.pt"))
     ap.add_argument("--seed", type=int, default=0)
@@ -202,43 +254,17 @@ def main():
     torch.set_num_threads(a.threads)
     net = SoccerMapNet(13).to(memory_format=torch.channels_last)
     n_par = sum(p.numel() for p in net.parameters())
-    opt = torch.optim.Adam(net.parameters(), lr=a.lr)
-    dl = torch.utils.data.DataLoader(PassData(part["train"], flip=True), batch_size=a.batch, shuffle=True, num_workers=2,
-                                     drop_last=True, persistent_workers=True)
-    yv = np.array([r["y"] for r in part["val"]], float)
-    best, best_state, bad, history, first = np.inf, None, 0, [], 0
-    ckpt = root / "soccermap_ckpt.pt"  # resume after an interruption
-    if ckpt.exists():
-        c = torch.load(ckpt, weights_only=False)
-        net.load_state_dict(c["model"])
-        opt.load_state_dict(c["opt"])
-        best, best_state, bad, history, first = c["best"], c["best_state"], c["bad"], c["history"], c["epoch"]
-        print(f"resuming after epoch {first}", flush=True)
-    for ep in range(first, a.epochs if bad < a.patience else first):
-        net.train()
-        t0, tot, n = time.time(), 0.0, 0
-        for X, iy, ix, y in dl:
-            z = net(X.to(memory_format=torch.channels_last))[:, 0]
-            loss = F.binary_cross_entropy_with_logits(z[torch.arange(len(iy)), iy, ix], y.float())
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-            tot, n = tot + float(loss.detach()) * len(y), n + len(y)
-        mv = metrics(predict(net, part["val"]), yv)
-        history.append({"epoch": ep + 1, "train_log_loss": round(tot / n, 4), **{f"val_{k}": v for k, v in mv.items()}})
-        print(f"epoch {ep + 1}: train {tot / n:.4f}, validation {mv} ({time.time() - t0:.0f} s)", flush=True)
-        if mv["log_loss"] < best - 1e-3:
-            best, bad = mv["log_loss"], 0
-            best_state = {k: v.detach().clone() for k, v in net.state_dict().items()}
-            torch.save({"model": {k: v.half() for k, v in best_state.items()}, "report": {"partial": history}}, a.out)
-        else:
-            bad += 1
-        torch.save({"model": net.state_dict(), "opt": opt.state_dict(), "best": best, "best_state": best_state,
-                    "bad": bad, "history": history, "epoch": ep + 1}, ckpt)
-        if bad >= a.patience:
-            break
-    net.load_state_dict(best_state)
+    history: list = []
     yt = np.array([r["y"] for r in part["test"]], float)
+    phases = {}
+    extra = pickle.load(open(a.extra, "rb")) if a.extra else []
+    if extra:
+        # phase A: the extra passes (no velocities) together with the tracking passes, validated on tracking
+        run_phase("A", net, extra + part["train"], part["val"], 1e-3, 15, 1500, 3, root, a.out, a.batch, history)
+        phases["after_extra_phase"] = metrics(predict(net, part["test"]), yt)
+        print("test after phase A", phases["after_extra_phase"], flush=True)
+    # phase B: the tracking passes (velocities, extrapolated players: what soccercal produces)
+    run_phase("B", net, part["train"], part["val"], 2e-4 if extra else 1e-3, 25, None, 4, root, a.out, a.batch, history)
     p_sm = predict(net, part["test"])
     ytr = np.array([r["y"] for r in part["train"]], float)
     Htr = np.stack([handcrafted(r) for r in part["train"]])
@@ -247,9 +273,10 @@ def main():
     report = {
         "data": {s: {"passes": len(rr), "completed": round(float(np.mean([r["y"] for r in rr])), 3),
                      "matches": sorted({f"{r['source']}:{r['match']}" for r in rr})} for s, rr in part.items()},
+        "extra_passes": len(extra), "extra_matches": len({r["match"] for r in extra}),
         "test": {"naive": metrics(np.full(len(yt), ytr.mean()), yt), "logistic": metrics(fit_logistic(Htr, ytr, Hte), yt),
-                 "soccermap": metrics(p_sm, yt)},
-        "test_by_source": {s: metrics(p_sm[src == s], yt[src == s]) for s in sorted(set(src))},
+                 "soccermap": metrics(p_sm, yt), **phases},
+        "test_by_source": {s_: metrics(p_sm[src == s_], yt[src == s_]) for s_ in sorted(set(src))},
         "parameters": int(n_par), "history": history,
     }
     print(json.dumps(report["test"], indent=1), json.dumps(report["test_by_source"], indent=1), flush=True)
