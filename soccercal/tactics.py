@@ -18,8 +18,9 @@ Models
   a line-by-line transcription of Shaw's loop.
 * ``space_control``: Fernández & Bornn (2018, "Wide Open Spaces"): each player's influence is a
   bivariate Gaussian centred 0.5 s ahead of him, stretched along his velocity, wider the further he
-  is from the ball (radius 4 m next to it, 10 m from ~18 m away); team control is the logistic of
-  the difference of the summed influences.
+  is from the ball (radius 4 m next to it, 10 m from ~19 m away, fitted to the paper's Figure 9);
+  team control is the logistic of the difference of the summed influences. Checked against the
+  paper's appendix (equations 13-21).
 * ``value_map``: pitch control times Shaw's EPV surface (``data/EPV_grid.csv``, the probability that
   a possession ends in a goal from each location; LaurieOnTracking, MIT licence): where the
   valuable space the attacking team can reach is.
@@ -308,13 +309,20 @@ def pitch_control(s: Snapshot, attacking: int | None = None, params: dict | None
 
 
 # ------------------------------------------------------------------ Fernández & Bornn space control
+def influence_radius(d_ball: np.ndarray) -> np.ndarray:
+    """Fernández & Bornn (2018), Figure 9: influence radius (m) against distance to the ball, 4 m at the
+    ball rising to 10 m at 18.8 m. The paper gives only the figure; this curve was fitted to it
+    (digitised: rms 0.05 m; the cubic ``4 + d^3/972`` used by other implementations is 0.6 m off at 17 m)."""
+    return np.minimum(4.0 + 6.0 * (np.asarray(d_ball) / 18.78) ** 2.854, 10.0)
+
+
 def influence(pos: np.ndarray, vel: np.ndarray, ball: np.ndarray, P: np.ndarray, max_speed: float = 13.0) -> np.ndarray:
-    """(n, m) influence of each player at points ``P`` (Fernández & Bornn 2018, appendix): a Gaussian
-    with mean ``pos + 0.5 vel``, axes ``R (1 ± Srat) / 2`` along / across the velocity, where
-    ``Srat = (speed / 13)^2`` and the radius ``R = min(4 + d_ball^3 / 972, 10)`` m; normalised by its
-    value at the player's own position."""
+    """(n, m) influence of each player at points ``P`` (Fernández & Bornn 2018, appendix, eqs. 13-21): a
+    Gaussian with mean ``pos + 0.5 vel``, axes ``R (1 ± Srat) / 2`` along / across the velocity, where
+    ``Srat = (speed / 13)^2`` and ``R`` grows with the distance to the ball (``influence_radius``);
+    normalised by its value at the player's own position."""
     d_ball = np.linalg.norm(pos - ball, axis=1)
-    R = np.minimum(4.0 + d_ball ** 3 / 972.0, 10.0)
+    R = influence_radius(d_ball)
     speed = np.linalg.norm(vel, axis=1)
     srat = np.minimum(speed, max_speed) ** 2 / max_speed ** 2
     s1 = R * (1 + srat) / 2
