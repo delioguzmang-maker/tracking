@@ -38,7 +38,7 @@ soccercal = "soccercal.cli:main"
 packages = ["soccercal"]
 
 [tool.setuptools.package-data]
-soccercal = ["data/*.csv", "data/*.txt"]
+soccercal = ["data/*.csv", "data/*.txt", "data/*.pt", "data/*.npz"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

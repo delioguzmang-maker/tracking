@@ -8,3 +8,4 @@ salida*/
 *.mp4
 *.pkl.gz
 !docs/*.mp4
+!soccercal/data/*.pt
