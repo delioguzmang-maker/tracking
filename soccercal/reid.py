@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 URL = "https://huggingface.co/kaiyangzhou/osnet/resolve/main/{}"
+SOCCER = Path(__file__).with_name("data") / "osnet_x0_25_soccer.pt"
 FILES = {
     "x0_25": ("osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_"
               "jitter.pth", [16, 64, 96, 128]),
@@ -119,13 +120,18 @@ class Embedder:
 
         from .weights import cache_dir as default_cache, download
 
-        fname, channels = FILES[variant]
-        path = Path(cache_dir or default_cache()) / f"osnet_{variant}_msmt17.pth"
-        if not path.exists():
-            download(URL.format(fname), path)
+        if variant == "soccer":  # x0.25 fine-tuned on SoccerNet players (tools/train_reid.py)
+            channels = FILES["x0_25"][1]
+            state = torch.load(SOCCER, map_location="cpu", weights_only=True)["model"]
+            state = {k: v.float() for k, v in state.items()}
+        else:
+            fname, channels = FILES[variant]
+            path = Path(cache_dir or default_cache()) / f"osnet_{variant}_msmt17.pth"
+            if not path.exists():
+                download(URL.format(fname), path)
+            state = torch.load(path, map_location="cpu", weights_only=True)
+            state = state.get("state_dict", state)
         self.net = _build(channels)
-        state = torch.load(path, map_location="cpu", weights_only=True)
-        state = state.get("state_dict", state)
         state = {k.replace("module.", ""): v for k, v in state.items() if not k.startswith(("classifier", "module.classifier"))}
         self.net.load_state_dict(state, strict=True)
         self.net.eval().to(device)
