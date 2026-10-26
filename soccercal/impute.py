@@ -60,22 +60,27 @@ def shape(P: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return P.mean(0), np.maximum(P.std(0), 3.0)
 
 
-def match_template(observed: np.ndarray, templates: np.ndarray, n_missing: int) -> tuple[np.ndarray, float]:
+def match_template(observed: np.ndarray, templates: np.ndarray, n_missing: int, top: int = 5) -> tuple[np.ndarray, float]:
     """``observed`` (k, 2): average normalised places of the k seen outfield players; ``templates``
-    (T, 10, 2): library formations. Returns the normalised places of the ``n_missing`` players (in the
-    seen players' frame of reference) and the matching cost per player."""
-    best, best_cost = None, np.inf
+    (T, 10, 2): library formations. Every template, with each choice of ``n_missing`` places left
+    free, is compared with the observed shape (both re-normalised to zero mean and unit spread,
+    places paired by the Hungarian algorithm). Returns the free places of the best matches (the
+    ``top`` best averaged when one player is missing), in the observed players' units, and the cost."""
+    co, so = observed.mean(0), np.maximum(observed.std(0), 1e-6)
+    obs = (observed - co) / so
+    found = []
     for tpl in templates:
         for gone in combinations(range(len(tpl)), n_missing):
             keep = np.setdiff1d(np.arange(len(tpl)), gone)
-            c, s = tpl[keep].mean(0), np.maximum(tpl[keep].std(0), 1e-6)  # re-normalised on the places seen
-            seen = (tpl[keep] - c) / s
-            cost = ((observed[:, None] - seen[None]) ** 2).sum(-1)
+            c, s = tpl[keep].mean(0), np.maximum(tpl[keep].std(0), 1e-6)
+            cost = ((obs[:, None] - ((tpl[keep] - c) / s)[None]) ** 2).sum(-1)
             r, q = linear_sum_assignment(cost)
-            tot = cost[r, q].sum() / len(observed)
-            if tot < best_cost:
-                best_cost, best = tot, (tpl[list(gone)] - c) / s
-    return best, best_cost
+            found.append((cost[r, q].sum() / len(obs), (tpl[list(gone)] - c) / s))
+    found.sort(key=lambda f: f[0])
+    best = found[:top] if n_missing == 1 else found[:1]
+    w = np.exp(-np.array([f[0] for f in best]) / max(best[0][0], 1e-3))
+    slots = sum(wi * f[1] for wi, f in zip(w, best)) / w.sum()
+    return slots * so + co, best[0][0]
 
 
 def complete(match: Match, players_per_team: int = 11, min_seen_frac: float = 0.0) -> Match:
