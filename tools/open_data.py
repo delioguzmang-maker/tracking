@@ -211,6 +211,49 @@ def metrica(root: Path, skip=()):
         print(f"metrica game {g}: {len(m.frames)} frames, {len(passes)} passes", flush=True)
 
 
+def _passes_on_tracking(rows, frames, X, Y, B, team, near: float = 1.5, search_s: float = 1.5,
+                        flight_s: float = 6.0) -> pd.DataFrame:
+    """Passes located on the tracking data. ``rows``: (event frame, team, passer column, receiver column
+    or -1, completed). The pass starts at the last frame of the ball's contact with the passer (within
+    ``near`` m) nearest to the event, and ends when the ball reaches the receiver (completed) or an
+    opponent / leaves the data (failed). Passes that cannot be located are dropped."""
+    idx = {f: i for i, f in enumerate(frames)}
+    P = np.stack([X, Y], -1)  # (T, players, 2)
+    out = []
+    w, fl = int(search_s * FPS), int(flight_s * FPS)
+    for f, tm, j, r, ok in rows:
+        i = idx.get(f)
+        if i is None or j < 0:
+            continue
+        a, b = max(0, i - w), min(len(frames), i + w + 1)
+        d = np.linalg.norm(B[a:b] - P[a:b, j], axis=1)
+        close = np.nonzero(d < near)[0]
+        if not len(close):
+            continue
+        k = close[np.argmin(np.abs(close + a - i))] + a
+        while k + 1 < len(frames) and frames[k + 1] == frames[k] + 1 and np.linalg.norm(B[k + 1] - P[k + 1, j]) < near:
+            k += 1
+        x0, y0 = B[k]
+        dest = None
+        for q in range(k + 3, min(len(frames), k + fl)):
+            if frames[q] != frames[k] + (q - k) or not np.isfinite(B[q]).all():  # gap / ball out
+                dest = B[q - 1] if not ok else None
+                break
+            if ok:
+                if r >= 0 and np.linalg.norm(B[q] - P[q, r]) < near:
+                    dest = B[q]
+                    break
+            else:
+                dd = np.linalg.norm(P[q] - B[q], axis=1)
+                if np.nanmin(np.where(team != tm, dd, np.inf)) < near:
+                    dest = B[q]
+                    break
+        if dest is None or not np.isfinite([x0, y0]).all():
+            continue
+        out.append((frames[k], tm, j, x0, y0, dest[0], dest[1], ok))
+    return pd.DataFrame(out, columns=["frame", "team", "passer", "x0", "y0", "x1", "y1", "success"])
+
+
 # -------------------------------------------------------------------------------------------- IDSSE
 def idsse(root: Path, skip=(), match_ids=IDSSE):
     from kloppy import sportec
@@ -257,22 +300,20 @@ def idsse(root: Path, skip=(), match_ids=IDSSE):
         m = Match(tab, ball, {}, tr.metadata.pitch_dimensions.pitch_length or 105.0,
                   tr.metadata.pitch_dimensions.pitch_width or 68.0, _side_from_gk(tab), (mid + "_home", mid + "_away"),
                   ("#d62728", "#1f4fb4"), FPS)
-        rows, controls = [], []
+        # DFL event positions are a few metres off and not exactly synchronised (median 4 m between
+        # the event and the tracked ball even after the best time shift): each pass is re-located on
+        # the tracking, from the ball leaving the passer to the ball reaching the receiver (or, if
+        # it failed, the first opponent / leaving the pitch).
+        rows = []
         for e in ev.records:
-            if e.coordinates is None:
-                continue
-            f = start[e.period.id] + int(round(e.timestamp.total_seconds() * FPS))
-            controls.append((f, e.coordinates.x, e.coordinates.y))
-            if e.event_type.name == "PASS" and e.result is not None and e.result.name in ("COMPLETE", "INCOMPLETE"):
-                rc = e.receiver_coordinates
-                rows.append((f, 0 if e.team == home_team else 1, ints.get(e.player.player_id, -1) if e.player else -1,
-                             e.coordinates.x, e.coordinates.y, rc.x if rc else np.nan, rc.y if rc else np.nan,
-                             int(e.result.name == "COMPLETE")))
-        passes = pd.DataFrame(rows, columns=["frame", "team", "passer", "x0", "y0", "x1", "y1", "success"])
-        nxt = _next_control(passes, pd.DataFrame(controls, columns=["frame", "x", "y"]).drop_duplicates("frame"))
-        miss = ~np.isfinite(passes["x1"].values)
-        passes.loc[miss, "x1"] = nxt.loc[miss, "x1"].values
-        passes.loc[miss, "y1"] = nxt.loc[miss, "y1"].values
+            if e.event_type.name == "PASS" and e.result is not None and e.result.name in ("COMPLETE", "INCOMPLETE") \
+                    and e.player is not None:
+                rc = getattr(e, "receiver_player", None)
+                rows.append((start[e.period.id] + int(round(e.timestamp.total_seconds() * FPS)),
+                             0 if e.team == home_team else 1, ints.get(e.player.player_id, -1),
+                             ints.get(rc.player_id, -1) if rc is not None else -1, int(e.result.name == "COMPLETE")))
+        passes = _passes_on_tracking(rows, frames, V[:, :n], V[:, n:2 * n], V[:, 2 * n:2 * n + 2],
+                                     np.array([team_of[p] for p in pids]))
         yield "idsse", mid, m, passes
         print(f"idsse {mid}: {len(m.frames)} frames, {len(passes)} passes", flush=True)
 
