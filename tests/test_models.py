@@ -108,3 +108,21 @@ def test_osnet_architecture_matches_the_published_weights():
     f = e([np.full((120, 50, 3), 128, np.uint8), np.zeros((80, 30, 3), np.uint8)])
     assert f.shape == (2, 512) and np.allclose(np.linalg.norm(f, axis=1), 1, atol=1e-5)
     assert isinstance(e.net, torch.nn.Module)
+
+
+def test_set_network_numpy_forward_matches_torch():
+    torch = pytest.importorskip("torch")
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    from train_impute import SetNet
+
+    from soccercal.impute import set_predict
+
+    torch.manual_seed(0)
+    net = SetNet(h=32, heads=4).eval()
+    obs = np.random.default_rng(0).normal(0, 1, (9, 2)).astype(np.float32)
+    with torch.no_grad():
+        ref = net(torch.from_numpy(obs[None]))[0].numpy()
+    assert np.allclose(set_predict(obs, net.arrays()), ref, atol=1e-5)

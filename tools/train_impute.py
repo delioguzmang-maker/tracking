@@ -24,7 +24,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from soccercal.impute import gk_features, match_template  # noqa: E402
+from soccercal.impute import gk_features, match_template, set_predict  # noqa: E402
 
 
 def team_halves(m):
@@ -58,6 +58,75 @@ def template(P: np.ndarray) -> np.ndarray:
     c = P.mean(1, keepdims=True)
     s = np.maximum(P.std(1, keepdims=True), 3.0)
     return ((P - c) / s).mean(0)
+
+
+def window(P: np.ndarray, j: int):
+    """Seen places (9, 2), averaged over the window in units of the seen players' centre and spread;
+    the hidden player's place in the same units; the per-frame centre and spread."""
+    keep = np.setdiff1d(np.arange(10), [j])
+    seen = P[:, keep]
+    c = seen.mean(1, keepdims=True)
+    s = np.maximum(seen.std(1, keepdims=True), 3.0)
+    return ((seen - c) / s).mean(0), ((P[:, j][:, None] - c) / s)[:, 0].mean(0), c[:, 0], s[:, 0]
+
+
+class SetNet(torch.nn.Module):
+    """Per-player encoder, self-attention across players, mean + max pooling, regression head."""
+
+    def __init__(self, h: int = 128, heads: int = 4):
+        super().__init__()
+        self.heads = heads
+        self.phi = torch.nn.Sequential(torch.nn.Linear(2, h), torch.nn.ReLU(), torch.nn.Linear(h, h), torch.nn.ReLU())
+        self.att = torch.nn.MultiheadAttention(h, heads, batch_first=True)
+        self.rho = torch.nn.Sequential(torch.nn.Linear(2 * h, h), torch.nn.ReLU(), torch.nn.Linear(h, 2))
+
+    def forward(self, x):
+        e = self.phi(x)
+        a, _ = self.att(e, e, e)
+        return self.rho(torch.cat([a.mean(1), a.max(1).values], 1))
+
+    def arrays(self) -> dict:
+        g = lambda t: t.detach().numpy()  # noqa: E731
+        return {"set_phi0_w": g(self.phi[0].weight), "set_phi0_b": g(self.phi[0].bias), "set_phi2_w": g(self.phi[2].weight),
+                "set_phi2_b": g(self.phi[2].bias), "set_in_w": g(self.att.in_proj_weight), "set_in_b": g(self.att.in_proj_bias),
+                "set_out_w": g(self.att.out_proj.weight), "set_out_b": g(self.att.out_proj.bias),
+                "set_rho0_w": g(self.rho[0].weight), "set_rho0_b": g(self.rho[0].bias), "set_rho2_w": g(self.rho[2].weight),
+                "set_rho2_b": g(self.rho[2].bias), "set_heads": np.array(self.heads)}
+
+
+def train_setnet(halves, per_half: int = 400, epochs: int = 40, seed: int = 1) -> SetNet:
+    """15-s windows of real teams with one outfield player hidden; mirrored across the long axis and
+    shuffled (the network must not depend on the order of the players)."""
+    rng = np.random.default_rng(seed)
+    X, Y = [], []
+    for h in halves:
+        T = len(h["frames"])
+        if T < 200:
+            continue
+        for _ in range(per_half):
+            s0 = rng.integers(0, T - 150)
+            if (np.diff(h["frames"][s0:s0 + 150]) != 1).any():
+                continue
+            obs, tgt, _, _ = window(h["P"][s0:s0 + 150], rng.integers(0, 10))
+            X.append(obs)
+            Y.append(tgt)
+    Xt, Yt = torch.tensor(np.array(X), dtype=torch.float32), torch.tensor(np.array(Y), dtype=torch.float32)
+    net = SetNet()
+    opt = torch.optim.Adam(net.parameters(), 1e-3)
+    sgn = torch.tensor([1.0, -1.0])
+    for _ in range(epochs):
+        perm = torch.randperm(len(Xt))
+        for i in range(0, len(Xt), 256):
+            j = perm[i:i + 256]
+            flip = (torch.rand(len(j)) < 0.5).float()[:, None]
+            x = Xt[j] * (1 - flip[:, :, None]) + Xt[j] * sgn * flip[:, :, None]
+            y = Yt[j] * (1 - flip) + Yt[j] * sgn * flip
+            loss = ((net(x[:, torch.randperm(9)]) - y) ** 2).sum(1).mean()
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+    print("set network trained on", len(Xt), "windows", flush=True)
+    return net.eval()
 
 
 def gk_samples(m, every: int = 10):
@@ -103,7 +172,7 @@ def main():
         rng.shuffle(ms)
         test |= set(ms[:max(1, round(0.2 * len(ms)))])
     lib = {"train": [], "all": []}
-    halves_test, gk = {"train": ([], []), "test": ([], [])}, []
+    halves_test, gk, train_halves = {"train": ([], []), "test": ([], [])}, [], []
     for p in files:
         d = pickle.load(open(p, "rb"))
         m = d["m"]
@@ -113,6 +182,7 @@ def main():
             lib["all"].append(t)
             if p not in test:
                 lib["train"].append(t)
+                train_halves.append(h)
             else:
                 gk.append((d["source"], m.pitch_length, m.pitch_width, h))
         X, Y = gk_samples(m)
@@ -150,7 +220,9 @@ def main():
     print(json.dumps(rep_gk, indent=1), flush=True)
     # ------------------------------------------------------------- outfield, held-out test
     T_train = np.array(lib["train"])
-    errs = {"library": [], "team_centre": [], "by_source": {}}
+    setnet = train_setnet(train_halves)
+    set_w = setnet.arrays()
+    errs = {"library": [], "team_centre": [], "set_network": [], "by_source": {}}
     for src, L, W, h in gk:
         T = len(h["frames"])
         if T < 200:
@@ -163,31 +235,30 @@ def main():
             j = rng.integers(0, 10)
             if h["det"] is not None and h["det"][s0:s0 + 150, j].mean() < 0.8:
                 continue  # in broadcast data, only test against positions that were really seen
-            keep = np.setdiff1d(np.arange(10), [j])
-            seen = P[:, keep]
-            c = seen.mean(1, keepdims=True)
-            s = np.maximum(seen.std(1, keepdims=True), 3.0)
-            obs = ((seen - c) / s).mean(0)
+            obs, _, c, s = window(P, j)
             slot, _ = match_template(obs, T_train, 1)
-            est = c[:, 0] + slot[0] * s[:, 0]
-            e_lib = np.linalg.norm(est - P[:, j], axis=1).mean()
-            e_c = np.linalg.norm(c[:, 0] - P[:, j], axis=1).mean()
+            e_lib = np.linalg.norm(c + slot[0] * s[:, None] - P[:, j], axis=1).mean()
+            e_set = np.linalg.norm(c + set_predict(obs, set_w) * s[:, None] - P[:, j], axis=1).mean()
             errs["library"].append(e_lib)
-            errs["team_centre"].append(e_c)
-            errs["by_source"].setdefault(src, []).append(e_lib)
+            errs["set_network"].append(e_set)
+            errs["team_centre"].append(np.linalg.norm(c - P[:, j], axis=1).mean())
+            errs["by_source"].setdefault(src, []).append(e_set)
     rep_of = {"windows": len(errs["library"]),
-              "median_error_m": {"formation_library": float(np.median(errs["library"])),
+              "median_error_m": {"set_network": float(np.median(errs["set_network"])),
+                                 "formation_library": float(np.median(errs["library"])),
                                  "team_centre": float(np.median(errs["team_centre"]))},
-              "p90_error_m": {"formation_library": float(np.percentile(errs["library"], 90)),
+              "p90_error_m": {"set_network": float(np.percentile(errs["set_network"], 90)),
+                              "formation_library": float(np.percentile(errs["library"], 90)),
                               "team_centre": float(np.percentile(errs["team_centre"], 90))},
-              "median_by_source": {k: float(np.median(v)) for k, v in errs["by_source"].items()}}
+              "median_by_source_set_network": {k: float(np.median(v)) for k, v in errs["by_source"].items()}}
     print(json.dumps(rep_of, indent=1), flush=True)
     report = {"test_matches": sorted(p.stem for p in test), "goalkeeper": rep_gk, "outfield": rep_of,
               "library_size": len(lib["all"])}
     json.dump(report, open(Path(a.cache) / "impute_report.json", "w"), indent=1)
     W1, b1, W2, b2 = (t.detach().numpy() for t in (net[0].weight.T, net[0].bias, net[2].weight.T, net[2].bias))
+    final = train_setnet(train_halves + [h for _, _, _, h in gk]).arrays()  # shipped: trained on every match
     np.savez(a.out, gk_W1=W1, gk_b1=b1, gk_W2=W2, gk_b2=b2, templates=np.array(lib["all"], np.float32),
-             report=json.dumps(report))
+             report=json.dumps(report), **final)
     print("saved", a.out)
 
 

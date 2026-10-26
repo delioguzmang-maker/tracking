@@ -8,10 +8,11 @@ the tracking files keep only what was seen or followed.
 * **Goalkeeper**: a small network (``data/impute.npz``) predicts where a team's goalkeeper stands
   from the ball, the team's shape (centroid and last defender) and who has the ball; trained on
   SkillCorner, IDSSE and Metrica tracking (``tools/train_impute.py``, error in the README).
-* **Outfield players**: a library of real team shapes (each team's average formation, relative to
-  its centre and spread) from the same data. The observed players' average shape is matched to every
-  library formation with one (or two) of its places left free; the best match says where the missing
-  player stands relative to his teammates, frame by frame.
+* **Outfield players**: a small set network looks at where the seen teammates stand relative to
+  their team (average over the clip, in units of the team's spread) and predicts the hole: where the
+  missing player stands relative to them; it is then placed frame by frame with the team's centre and
+  spread. Trained on real teams with one player hidden; a library of real formations (matching the
+  observed shape with one place left free) is kept as the fallback and as a baseline.
 """
 from __future__ import annotations
 
@@ -83,6 +84,28 @@ def match_template(observed: np.ndarray, templates: np.ndarray, n_missing: int, 
     return slots * so + co, best[0][0]
 
 
+def set_predict(obs: np.ndarray, m: dict | None = None) -> np.ndarray:
+    """Normalised place of the missing outfield player from the seen players' average normalised
+    places ``obs`` (k, 2): a set network (shared per-player encoder, self-attention, mean and max
+    pooling) trained on real teams with one player hidden (``tools/train_impute.py``)."""
+    m = m or _model()
+    relu = lambda x: np.maximum(x, 0.0)  # noqa: E731
+    e = relu(relu(obs @ m["set_phi0_w"].T + m["set_phi0_b"]) @ m["set_phi2_w"].T + m["set_phi2_b"])
+    h = e.shape[1]
+    nh = int(m["set_heads"])
+    q, k, v = np.split(e @ m["set_in_w"].T + m["set_in_b"], 3, axis=1)
+    d = h // nh
+    heads = []
+    for i in range(nh):
+        qi, ki, vi = (z[:, i * d:(i + 1) * d] for z in (q, k, v))
+        a = qi @ ki.T / np.sqrt(d)
+        a = np.exp(a - a.max(1, keepdims=True))
+        heads.append((a / a.sum(1, keepdims=True)) @ vi)
+    att = np.concatenate(heads, 1) @ m["set_out_w"].T + m["set_out_b"]
+    z = np.concatenate([att.mean(0), att.max(0)])
+    return relu(z @ m["set_rho0_w"].T + m["set_rho0_b"]) @ m["set_rho2_w"].T + m["set_rho2_b"]
+
+
 def complete(match: Match, players_per_team: int = 11, min_seen_frac: float = 0.0) -> Match:
     """A copy of ``match`` with the players it lacks added at estimated positions (``imputed``)."""
     tab = match.table.copy()
@@ -111,7 +134,10 @@ def complete(match: Match, players_per_team: int = 11, min_seen_frac: float = 0.
                     rel[pid].append(p)
             obs = np.array([np.mean(r, 0) for r in rel.values() if len(r)])
             if len(obs) >= 6:
-                slots, _ = match_template(obs, templates, min(n_missing_out, 2))
+                slots = []
+                for _ in range(min(n_missing_out, 2)):  # one at a time: the first fills a hole, then the next
+                    slots.append(set_predict(obs, mdl) if "set_rho2_w" in mdl else match_template(obs, templates, 1)[0][0])
+                    obs = np.vstack([obs, slots[-1]])
                 for j, slot in enumerate(slots):
                     pid = -(10 * (team + 1) + j + 1)
                     for k, v in by_f.items():
