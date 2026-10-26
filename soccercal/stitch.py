@@ -47,6 +47,7 @@ class Tracklet:
     v1: np.ndarray = field(default_factory=lambda: np.zeros(2))
     s0: float = 0.0  # position uncertainty (m, largest axis) at the start / end
     s1: float = 0.0
+    reid: np.ndarray | None = None  # mean appearance embedding (unit; soccer OSNet, ``reid.py``)
 
     @property
     def start(self) -> int:
@@ -122,6 +123,8 @@ class StitchConfig:
     team_follow: float = 0.8  # fraction of the visible team's motion applied off-screen
     max_gap_s: float = 60.0
     app_weight: float = 0.6
+    reid_weight: float = 1.0  # appearance (re-identification) term: weight on 1 - cosine
+    reid_min: float = 0.4  # below this cosine the two tracklets are different people
     max_cost: float = 1.0
     ambiguity_ratio: float = 1.1  # a rival within ratio x best cost that prefers the link vetoes it
     min_team_conf: float = 0.5
@@ -158,6 +161,11 @@ def link_cost(a: Tracklet, b: Tracklet, fps: float, cfg: StitchConfig, motion: T
         c *= 0.3  # the shirt number says it is the same player
     if a.desc is not None and b.desc is not None:
         c += cfg.app_weight * float(1.0 - np.clip(a.desc @ b.desc, 0, 1))
+    if a.reid is not None and b.reid is not None:
+        cos = float(a.reid @ b.reid)
+        if cos < cfg.reid_min:  # held-out SoccerNet: 0.08 % of same-player pairs fall below 0.4
+            return np.inf
+        c += cfg.reid_weight * (1.0 - cos)
     return float(c)
 
 

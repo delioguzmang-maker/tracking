@@ -38,6 +38,7 @@ class FrameData:
     jersey: dict | None = None  # {person detection index: (shirt number, confidence)} (keyframes only)
     shot: str = "unknown"  # set by cameras.solve_cameras: "wide", "closeup" or "no_pitch"
     ball_sv: np.ndarray | None = None  # (n_ball, 2) colour of each ball candidate (saturation, brightness)
+    reid: dict | None = None  # {person detection index: appearance embedding (float16)}, second look
 
     @property
     def keyframe(self) -> bool:

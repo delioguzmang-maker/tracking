@@ -25,6 +25,9 @@ class Config:
     jersey_ocr: bool = True  # read shirt numbers (bundled OCR model; needs rapidocr_onnxruntime)
     jersey_crops: int = 3  # players read per keyframe (the largest ones)
     jersey_views: int = 80  # second look: best views of each player read over the whole clip
+    reid: bool = True  # second look: appearance of every player (soccer OSNet) to cut identity switches
+    # and to join the fragments of the same player
+    reid_every_s: float = 0.2  # one view per player every this many seconds
     # ----------------------------------------------------------- calibration
     cut_threshold: float = 0.30  # frame-signature distance that means a shot cut
     min_align: float = 0.35  # minimum line alignment to accept a calibration

@@ -175,9 +175,9 @@ PASS1_KEYS = ("start_s", "max_seconds", "stride", "keyframe_every", "det_model",
 
 
 def second_look(an: Analysis, res: "Result", cfg: Config, progress: bool = True) -> bool:
-    """Pass 1b (see ``refine.py``): high-resolution ball search where the ball is missing, and
-    shirt numbers read on each player's best views. Runs once per analysis (remembered in
-    ``an.config``). Returns True if ``an`` changed."""
+    """Pass 1b (see ``refine.py``): high-resolution ball search where the ball is missing, shirt
+    numbers read on each player's best views, and each player's appearance (``reid.py``). Runs once
+    per analysis (remembered in ``an.config``). Returns True if ``an`` changed."""
     changed = False
     if cfg.ball_refine and not an.config.get("ball_refined"):
         from .detect import PlayerDetector
@@ -197,6 +197,20 @@ def second_look(an: Analysis, res: "Result", cfg: Config, progress: bool = True)
             an.config["numbers_read_count"] = read_numbers(an, res.tracking, reader, progress=progress,
                                                            per_identity=cfg.jersey_views)
             an.config["numbers_read"] = True
+            changed = True
+    if cfg.reid and not an.config.get("reid_done"):
+        from .refine import embed_players
+        from .reid import Embedder
+
+        try:
+            emb = Embedder("soccer")
+        except Exception as e:  # noqa: BLE001 - no model: tracking works without it
+            if progress:
+                print(f"Sin modelo de apariencia ({e}): las identidades usan solo posición, color y dorsal.")
+            emb = None
+        if emb is not None:
+            an.config["reid_views"] = embed_players(an, res.tracking, emb, every_s=cfg.reid_every_s, progress=progress)
+            an.config["reid_done"] = True
             changed = True
     return changed
 

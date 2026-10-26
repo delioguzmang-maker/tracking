@@ -167,3 +167,28 @@ def test_roster_fill_joins_fragments_to_ten_per_team():
     assert len(out) == 10
     for i in out:
         assert len({t.player for t in i.tracklets}) == 1
+
+
+def test_split_by_appearance_cuts_a_switch_between_teammates():
+    from types import SimpleNamespace
+
+    from soccercal.players import split_by_appearance
+
+    rng = np.random.default_rng(0)
+    A, B = np.eye(512)[0], np.eye(512)[1]
+
+    def scene(mate_dist: float, switch: bool):
+        frames, meas, obs = [], [], []
+        for f in range(30):
+            e = (B if switch and f >= 15 else A) + rng.normal(0, 0.005, 512)
+            frames.append(SimpleNamespace(reid={0: e.astype(np.float16)}))
+            z = np.array([f * 0.2, 0.0])
+            mate = z + [0.0, mate_dist if 12 <= f <= 16 else 20.0]
+            meas.append(SimpleNamespace(det_idx=np.array([0, 1]), xy=np.array([z, mate]), label=np.array([0, 0])))
+            obs.append((f, z, np.eye(2), 0, 0.9))
+        return [obs], meas, SimpleNamespace(frames=frames)
+
+    pieces = split_by_appearance(*scene(1.0, True))
+    assert [len(p) for p in pieces] == [15, 15] or [len(p) for p in pieces] == [16, 14] or [len(p) for p in pieces] == [14, 16]
+    assert len(split_by_appearance(*scene(1.0, False))) == 1  # same player all along
+    assert len(split_by_appearance(*scene(8.0, True))) == 1  # no teammate close: not a crossing

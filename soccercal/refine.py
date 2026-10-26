@@ -243,3 +243,81 @@ def read_numbers(an: Analysis, tracking, reader, progress: bool = True, per_iden
     if bar is not None:
         bar.close()
     return n
+
+
+def reid_views(an: Analysis, tracking, every_s: float = 0.2, min_height_frac: float = 0.035,
+               max_overlap: float = 0.3) -> dict[int, list[int]]:
+    """{analysed frame: [person detection indices]}: every tracked player and goalkeeper once every
+    ``every_s`` seconds, when his box is big enough and not overlapped by somebody else."""
+    meas = tracking.measurements
+    step = max(1, int(round(every_s * an.proc_fps)))
+    out: dict[int, list[int]] = {}
+    for ident in tracking.identities:
+        if ident.role not in ("player", "goalkeeper"):
+            continue
+        for t in ident.tracklets:
+            last = -10 ** 9
+            for f, d in zip(t.frames, t.det_idx):
+                f = int(f)
+                if f - last < step:
+                    continue
+                j = int(meas[f].det_idx[d])
+                boxes = an.frames[f].det.persons().boxes
+                b = boxes[j]
+                if b[3] - b[1] < min_height_frac * an.height:
+                    continue
+                if len(boxes) > 1 and _iou(b[None], np.delete(boxes, j, 0)).max() > max_overlap:
+                    continue
+                out.setdefault(f, []).append(j)
+                last = f
+    return out
+
+
+def embed_players(an: Analysis, tracking, embedder, every_s: float = 0.2, progress: bool = True,
+                  batch: int = 64) -> int:
+    """Appearance embeddings (``reid.Embedder``) of the views chosen by ``reid_views``, stored in the
+    frames' ``reid`` dicts (float16). Returns the number of views embedded."""
+    views = reid_views(an, tracking, every_s)
+    if not views:
+        return 0
+    by_index = {fd.index: i for i, fd in enumerate(an.frames)}
+    bar = None
+    if progress:
+        try:
+            from tqdm.auto import tqdm
+            bar = tqdm(total=sum(len(v) for v in views.values()), unit="recorte", desc="Apariencia de los jugadores")
+        except ImportError:
+            pass
+    pending: list = []  # (frame i, detection j, crop)
+    n = 0
+
+    def flush():
+        nonlocal n
+        if not pending:
+            return
+        E = embedder([c for _, _, c in pending])
+        for (i, j, _), e in zip(pending, E):
+            fd = an.frames[i]
+            fd.reid = dict(fd.reid or {})
+            fd.reid[j] = e.astype(np.float16)
+        n += len(pending)
+        if bar is not None:
+            bar.update(len(pending))
+        pending.clear()
+
+    for idx, fr in iter_frames(an.video, an.config.get("start_s", 0.0), an.stride, len(an.frames), fps=an.fps):
+        i = by_index.get(idx)
+        if i is None or i not in views:
+            continue
+        boxes = an.frames[i].det.persons().boxes
+        for j in views[i]:
+            x1, y1, x2, y2 = np.round(boxes[j]).astype(int)
+            crop = fr[max(0, y1):max(y1 + 1, y2), max(0, x1):max(x1 + 1, x2)]
+            if crop.size:
+                pending.append((i, j, crop))
+        if len(pending) >= batch:
+            flush()
+    flush()
+    if bar is not None:
+        bar.close()
+    return n
