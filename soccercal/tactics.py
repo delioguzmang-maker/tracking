@@ -557,7 +557,8 @@ BALL_COLOR = "#ffd400"  # yellow, as on the verification video's minimap
 def plot_control(match: Match, frame: int, model: str = "spearman", ax=None, n_grid_cells_x: int | None = None,
                  show_view: bool = True, arrows: bool = True, labels: bool = True):
     """Map of who controls the space at ``frame``. ``model``: ``"spearman"`` (Spearman / Shaw),
-    ``"fernandez"`` (Fernández & Bornn) or ``"value"`` (Spearman x EPV of the team in possession).
+    ``"fernandez"`` (Fernández & Bornn), ``"value"`` (Spearman x EPV of the team in possession) or
+    ``"soccermap"`` (probability that a pass from the ball to each point is completed).
 
     Colour = team that would win a ball played there (white = 50/50). Solid dots = seen by the
     camera, see-through with a dashed outline = estimated; yellow = the ball; arrows = where each
@@ -573,6 +574,10 @@ def plot_control(match: Match, frame: int, model: str = "spearman", ax=None, n_g
     cols = (c0, c1)
     if model == "fernandez":
         sf = space_control(s, n_grid_cells_x=n_grid_cells_x or 105)
+    elif model == "soccermap":
+        from .soccermap import pass_success
+
+        sf = pass_success(s)
     else:
         sf = pitch_control(s, n_grid_cells_x=n_grid_cells_x or 50)
     ext = (-L / 2, L / 2, -W / 2, W / 2)
@@ -588,8 +593,9 @@ def plot_control(match: Match, frame: int, model: str = "spearman", ax=None, n_g
         other = 1 - sf.team
         im = ax.imshow(sf.values, extent=ext, origin="lower", cmap=_cmap(cols[other], cols[sf.team]), vmin=0, vmax=1,
                        interpolation="bilinear", zorder=1)
-        label = (f"probabilidad de que {match.names[sf.team]} gane un balón jugado ahí" if model == "spearman"
-                 else f"control de {match.names[sf.team]} (0-1)")
+        label = {"spearman": f"probabilidad de que {match.names[sf.team]} gane un balón jugado ahí",
+                 "soccermap": f"probabilidad de que un pase de {match.names[sf.team]} ahí salga bien"}.get(
+            model, f"control de {match.names[sf.team]} (0-1)")
     draw_pitch(ax, L, W)
     if show_view and s.view is not None:
         from matplotlib.path import Path as MPath
@@ -640,7 +646,8 @@ def plot_control(match: Match, frame: int, model: str = "spearman", ax=None, n_g
     ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.0), ncol=len(handles), fontsize=8,
               frameon=False)
     n0, n1 = int((s.team == 0).sum()), int((s.team == 1).sum())
-    name = {"spearman": "Spearman / Shaw", "fernandez": "Fernández & Bornn", "value": "Spearman x EPV"}.get(model, model)
+    name = {"spearman": "Spearman / Shaw", "fernandez": "Fernández & Bornn", "value": "Spearman x EPV",
+            "soccermap": "SoccerMap (pase)"}.get(model, model)
     ttl = (f"{name}  ·  t = {frame / match.fps:.1f} s  ·  posesión: "
            f"{match.names[s.attacking] if s.attacking >= 0 else 'posesión desconocida'}  ·  "
            f"jugadores {match.names[0]} {n0}, {match.names[1]} {n1}")

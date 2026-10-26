@@ -496,13 +496,20 @@ else:
     print(f"diferencia máxima con el código de Shaw: {np.abs(shaw - nuestro).max():.1e}")
 '''),
     md("""
-## 7) SoccerMap: los 13 canales de entrada (para entrenar modelos)
+## 7) SoccerMap: ¿saldría bien un pase a cada punto?
 
-*SoccerMap* (Fernández y Bornn, 2020) es una red neuronal que aprende, a partir de muchos pases, la
-probabilidad de que un pase a cada punto salga bien. Necesita miles de pases etiquetados para
-entrenarse; aquí solo se prepara su entrada: 13 "imágenes" del campo (posiciones y velocidades de los
-dos equipos, distancias y ángulos al balón y a la portería...), orientadas para que el equipo con el
-balón ataque hacia la derecha.
+*SoccerMap* (Fernández y Bornn, 2020) es una red neuronal que aprende, a partir de muchos pases reales, la
+probabilidad de que un pase desde donde está el balón hasta cada punto del campo salga bien. La hemos
+entrenado con unos 22.000 pases de 29 partidos con datos abiertos (20 de SkillCorner, sacados de la
+televisión como los nuestros; 7 de la Bundesliga, IDSSE; 2 de Metrica) y medido en partidos que la red no
+vio al entrenar (resultados en el README). Color del equipo con el balón = el pase saldría bien.
+"""),
+    code('''
+plot_control(m, k, model="soccermap");
+'''),
+    md("""
+Lo que la red "ve" son 13 imágenes del campo (posiciones y velocidades de los dos equipos, distancias y
+ángulos al balón y a la portería...), orientadas para que el equipo con el balón ataque hacia la derecha:
 """),
     code('''
 from soccercal.tactics import soccermap_tensor, SOCCERMAP_CHANNELS
@@ -513,5 +520,52 @@ for ax, ch, nombre in zip(axs.flat, X, SOCCERMAP_CHANNELS):
 for ax in axs.flat[len(X):]:
     ax.axis("off")
 plt.tight_layout()
+'''),
+    md("""
+## 8) Jugadores que el vídeo no enseña nunca
+
+Si la cámara nunca muestra a un jugador (muchas veces un portero), ese equipo tiene menos de 11 y los
+mapas regalan esa zona al rival. `complete` los añade en una posición **deducida** (círculo de puntos con
+"?"): el portero con una red que aprendió de partidos reales dónde se coloca según el balón y su línea
+defensiva; un jugador de campo comparando la forma de sus compañeros con cientos de formaciones reales.
+Solo se usan para los mapas: los archivos de tracking no se tocan.
+"""),
+    code('''
+from soccercal.impute import complete
+mc = complete(m)
+print(mc.table[mc.table.imputed].groupby("player_id").agg(equipo=("team", "first"), portero=("gk", "first")))
+fig, axs = plt.subplots(2, 1, figsize=(11, 15))
+plot_control(m, k, ax=axs[0]); axs[0].set_title("solo lo que se ha visto")
+plot_control(mc, k, ax=axs[1]); axs[1].set_title("con los jugadores deducidos")
+plt.tight_layout()
+'''),
+    md("""
+## 9) Valor del campo y ganancia de espacio (Fernández y Bornn, "Wide Open Spaces")
+
+**Valor del campo:** dónde se colocan los defensas según dónde está el balón; donde se juntan, el espacio
+vale (aprendido de partidos reales, como en el artículo), y vale más cuanto más cerca de la portería.
+
+**Ganancia de espacio (SOG):** en los 3 segundos después de cada posesión, cuánto mejora cada jugador la
+calidad del espacio que controla (control × valor). *Activa* si corre (más de 1,5 m/s), *pasiva* si
+camina: el artículo mostró que Messi ganaba espacio sobre todo andando. **Generación de espacio (SGG):** un
+jugador arrastra al rival que marcaba a un compañero y le deja libre.
+"""),
+    code('''
+from soccercal.space import pitch_value
+from soccercal.tactics import grid, draw_pitch
+xg, yg = grid(105)
+P = np.stack(np.meshgrid(xg, yg), -1).reshape(-1, 2)
+fig, axs = plt.subplots(1, 3, figsize=(18, 4))
+for ax, bx in zip(axs, (-30, 0, 30)):
+    v = pitch_value([bx, 10], P).reshape(len(yg), len(xg))
+    ax.imshow(v, extent=(-52.5, 52.5, -34, 34), origin="lower", cmap="Greens", vmin=0, vmax=1)
+    draw_pitch(ax); ax.scatter([bx], [10], c="#ffd400", edgecolors="k", zorder=5)
+    ax.set_title(f"balón en ({bx}, 10), atacando hacia la derecha", fontsize=9)
+'''),
+    code('''
+from soccercal import space
+equipo = m.snapshot(k).attacking if m.snapshot(k).attacking >= 0 else 0
+print("equipo:", m.names[equipo])
+space.summary(mc, equipo).round(4)
 '''),
 ])
