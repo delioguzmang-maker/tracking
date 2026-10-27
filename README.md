@@ -356,6 +356,11 @@ intercambiaban a mitad de clip y salían con el color equivocado).
   segundo 10 (comprobado fotograma a fotograma). Antes el programa aceptaba que el balón "diera media
   vuelta" hasta la bota de un jugador del PSG que se tiraba al suelo, y le daba la posesión al PSG:
   ahora una cadena de detecciones en los pies solo continúa un pase rápido si está en su trayectoria.
+* Un balón que se ha visto alejarse más de 3 m de quien lo tenía (pase, centro, despeje) ya no
+  "vuelve" a sus pies cuando se pierde en el aire: queda como desconocido. En los clips de SoccerNet
+  esto quitaba un centro (SNMOT-141, 1,7 s) y un balón largo (SNMOT-116, 1,3 s) pegados al pie del
+  que los golpeó. En los mapas de espacio el anillo de "tiene el balón" solo sale si el balón está
+  en sus pies en ese momento.
 * Dorsales leídos: 2, 6, 9, 10, 17 y 27 del Bayern y 25 del PSG (todos correctos).
 * La calibración cae sobre las líneas reales en todo el clip (círculo central, área, portería).
 
