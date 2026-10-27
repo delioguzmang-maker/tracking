@@ -500,9 +500,10 @@ else:
 
 *SoccerMap* (Fernández y Bornn, 2020) es una red neuronal que aprende, a partir de muchos pases reales, la
 probabilidad de que un pase desde donde está el balón hasta cada punto del campo salga bien. La hemos
-entrenado con unos 22.000 pases de 29 partidos con datos abiertos (20 de SkillCorner, sacados de la
-televisión como los nuestros; 7 de la Bundesliga, IDSSE; 2 de Metrica) y medido en partidos que la red no
-vio al entrenar (resultados en el README). Color del equipo con el balón = el pase saldría bien.
+entrenado primero con 270.000 pases de StatsBomb 360 (293 partidos) y después con unos 22.000 pases de 29
+partidos con datos de seguimiento abiertos (20 de SkillCorner, sacados de la televisión como los nuestros;
+7 de la Bundesliga, IDSSE; 2 de Metrica), y medido en partidos que la red no vio al entrenar: acierta más
+que la regresión logística del propio artículo (resultados en el README). Color del equipo con el balón = el pase saldría bien.
 """),
     code('''
 plot_control(m, k, model="soccermap");

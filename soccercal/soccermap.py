@@ -8,9 +8,10 @@ coarse predictions are upsampled (2x nearest neighbour + 32 3x3 filters + ReLU +
 filter) and fused with the finer one by a 1x1 convolution; a sigmoid gives the probability surface.
 It is trained with the paper's target-location loss: only the cell where the pass went is scored.
 
-``pass_success`` loads the weights trained by ``tools/train_soccermap.py`` on open tracking data
-(SkillCorner broadcast tracking, IDSSE / DFL and Metrica optical tracking; see the README for the
-measured accuracy) and returns, for a frame, the probability that a pass from the ball to each cell
+``pass_success`` loads the weights trained by ``tools/train_soccermap.py``: first on StatsBomb 360
+passes (players in the broadcast image, no velocities), then on open tracking data (SkillCorner
+broadcast tracking, IDSSE / DFL and Metrica optical tracking; see the README for the measured
+accuracy) and returns, for a frame, the probability that a pass from the ball to each cell
 is completed.
 """
 from __future__ import annotations
