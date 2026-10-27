@@ -71,21 +71,36 @@ def main():
         ms = [p for p in files if p.stem.startswith(src)]
         rng.shuffle(ms)
         test |= set(ms[:max(1, round(0.2 * len(ms)))])
-    data = {"train": ([], []), "test": ([], [])}
-    for p in files:
-        X, Y = situations(p)
-        if X is None:
-            continue
-        part = "test" if p in test else "train"
-        data[part][0].append(X)
-        data[part][1].append(Y)
-        print(p.stem, part, len(X) // 315, "situations", flush=True)
-    Xtr, Ytr = (torch.from_numpy(np.concatenate(v)) for v in data["train"])
-    Xte, Yte = (torch.from_numpy(np.concatenate(v)) for v in data["test"])
+    cache = Path(a.cache) / "pitch_value_situations.npz"  # building them takes a while: kept
+    if cache.exists():
+        z = np.load(cache)
+        Xtr, Ytr, Xte, Yte = (torch.from_numpy(z[k]) for k in ("Xtr", "Ytr", "Xte", "Yte"))
+    else:
+        data = {"train": ([], []), "test": ([], [])}
+        for p in files:
+            X, Y = situations(p)
+            if X is None:
+                continue
+            part = "test" if p in test else "train"
+            data[part][0].append(X)
+            data[part][1].append(Y)
+            print(p.stem, part, len(X) // 315, "situations", flush=True)
+        Xtr, Ytr = (torch.from_numpy(np.concatenate(v)) for v in data["train"])
+        Xte, Yte = (torch.from_numpy(np.concatenate(v)) for v in data["test"])
+        np.savez(cache, Xtr=Xtr.numpy(), Ytr=Ytr.numpy(), Xte=Xte.numpy(), Yte=Yte.numpy())
     net = torch.nn.Sequential(torch.nn.Linear(4, a.hidden), torch.nn.Sigmoid(), torch.nn.Linear(a.hidden, 1), torch.nn.Sigmoid())
     opt = torch.optim.Adam(net.parameters(), lr=3e-3)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, a.epochs)
-    for ep in range(a.epochs):
+    ckpt, first = Path(a.cache) / "pitch_value_ckpt.pt", 0  # resume after an interruption
+    if ckpt.exists():
+        c = torch.load(ckpt, weights_only=False)
+        net.load_state_dict(c["net"])
+        opt.load_state_dict(c["opt"])
+        sched.load_state_dict(c["sched"])
+        first = c["epoch"]
+        print("resuming after epoch", first, flush=True)
+    mse = float("nan")
+    for ep in range(first, a.epochs):
         perm = torch.randperm(len(Xtr))
         for i in range(0, len(Xtr), 1024):
             j = perm[i:i + 1024]
@@ -97,6 +112,9 @@ def main():
         with torch.no_grad():
             mse = float(torch.mean((net(Xte)[:, 0] - Yte) ** 2))
         print(f"epoch {ep + 1}: test MSE {mse:.4f}", flush=True)
+        torch.save({"net": net.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(), "epoch": ep + 1}, ckpt)
+    with torch.no_grad():
+        mse = float(torch.mean((net(Xte)[:, 0] - Yte) ** 2))
     # baselines: the overall mean, and the mean of every grid cell (ignoring where the ball is)
     cell_mean = Ytr.reshape(-1, 315).mean(0)
     report = {"situations": {"train": len(Xtr) // 315, "test": len(Xte) // 315},

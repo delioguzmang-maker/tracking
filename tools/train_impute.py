@@ -236,14 +236,14 @@ def main():
             if h["det"] is not None and h["det"][s0:s0 + 150, j].mean() < 0.8:
                 continue  # in broadcast data, only test against positions that were really seen
             obs, _, c, s = window(P, j)
-            slot, _ = match_template(obs, T_train, 1)
-            e_lib = np.linalg.norm(c + slot[0] * s[:, None] - P[:, j], axis=1).mean()
+            if len(errs["set_network"]) % 3 == 0:  # the library baseline is slow: every third window
+                slot, _ = match_template(obs, T_train, 1)
+                errs["library"].append(np.linalg.norm(c + slot[0] * s[:, None] - P[:, j], axis=1).mean())
             e_set = np.linalg.norm(c + set_predict(obs, set_w) * s[:, None] - P[:, j], axis=1).mean()
-            errs["library"].append(e_lib)
             errs["set_network"].append(e_set)
             errs["team_centre"].append(np.linalg.norm(c - P[:, j], axis=1).mean())
             errs["by_source"].setdefault(src, []).append(e_set)
-    rep_of = {"windows": len(errs["library"]),
+    rep_of = {"windows": len(errs["set_network"]), "windows_library": len(errs["library"]),
               "median_error_m": {"set_network": float(np.median(errs["set_network"])),
                                  "formation_library": float(np.median(errs["library"])),
                                  "team_centre": float(np.median(errs["team_centre"]))},
