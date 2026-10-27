@@ -238,8 +238,8 @@ def main():
             obs, _, c, s = window(P, j)
             if len(errs["set_network"]) % 3 == 0:  # the library baseline is slow: every third window
                 slot, _ = match_template(obs, T_train, 1)
-                errs["library"].append(np.linalg.norm(c + slot[0] * s[:, None] - P[:, j], axis=1).mean())
-            e_set = np.linalg.norm(c + set_predict(obs, set_w) * s[:, None] - P[:, j], axis=1).mean()
+                errs["library"].append(np.linalg.norm(c + slot[0] * s - P[:, j], axis=1).mean())
+            e_set = np.linalg.norm(c + set_predict(obs, set_w) * s - P[:, j], axis=1).mean()
             errs["set_network"].append(e_set)
             errs["team_centre"].append(np.linalg.norm(c - P[:, j], axis=1).mean())
             errs["by_source"].setdefault(src, []).append(e_set)
