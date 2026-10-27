@@ -352,6 +352,10 @@ intercambiaban a mitad de clip y salían con el color equivocado).
 * Los dos entrenadores de negro junto a la banda son *staff*: no se dibujan ni salen en los datos.
 * El árbitro sale una sola vez, aunque tapado por jugadores lo detectan dos cajas.
 * El portero del PSG se asigna al PSG.
+* El pase adelantado del segundo 4,7 llega al 10 del Bayern y el balón sigue su conducción hasta el
+  segundo 10 (comprobado fotograma a fotograma). Antes el programa aceptaba que el balón "diera media
+  vuelta" hasta la bota de un jugador del PSG que se tiraba al suelo, y le daba la posesión al PSG:
+  ahora una cadena de detecciones en los pies solo continúa un pase rápido si está en su trayectoria.
 * Dorsales leídos: 2, 6, 9, 10, 17 y 27 del Bayern y 25 del PSG (todos correctos).
 * La calibración cae sobre las líneas reales en todo el clip (círculo central, área, portería).
 
@@ -361,6 +365,35 @@ banda, mientras la cámara lo ve y gira hasta 7°/s, sale con 0,3 m/s de mediana
 no se reutiliza la del fotograma calibrado más cercano, que es lo que provoca saltos de casi un metro
 y velocidades falsas de 4–7 m/s en otros sistemas. En el control del espacio, 0,49 m/s de error mueven
 el punto de reacción de un jugador como mucho 0,35 m (× 0,7 s).
+
+**Identidades con verdad conocida: SoccerNet** (`python tools/soccernet_eval.py`). Tres clips de 30 s del
+conjunto de prueba de SoccerNet-Tracking 2023 (retransmisión 1080p, cada jugador marcado con su identidad,
+equipo y dorsal; el programa no los vio nunca), pasados por el programa entero:
+
+| clip | IDF1 sin / con apariencia | identidades por jugador | equipo correcto | dorsales bien / mal |
+|---|---|---|---|---|
+| SNMOT-116 (córner: área llena) | 0,679 / **0,719** | 3,08 / 2,92 | 99,1 % | 15 / 1 |
+| SNMOT-126 | 0,951 / **0,951** | 1,41 / 1,41 | 99,9 % | 8 / 1 |
+| SNMOT-141 | 0,773 / **0,790** | 2,05 / 1,95 | 99,6 % | 14 / 0 |
+| media | 0,801 / **0,820** | | | 37 / 2 |
+
+IDF1 = fracción de las cajas de jugadores atribuidas a la persona correcta durante todo el clip (1 = perfecto).
+Lo que más falla son las melés: en el córner, el seguidor salta entre dos compañeros que se tapan durante
+1–2 s; cuando no se ven (cajas superpuestas) tampoco hay apariencia que comparar.
+
+**Distinguir a dos compañeros de equipo por su aspecto** (`python tools/reid_benchmark.py`, 4 clips de
+prueba de SoccerNet, recortes separados al menos 1 s):
+
+| descriptor | acierto (el más parecido es el mismo jugador) | AUC mismo / otro compañero | AUC detectar un cambio de identidad |
+|---|---|---|---|
+| color de la camiseta (lo que se usaba) | 39 % | 0,64 | 0,59 |
+| OSNet publicado (MSMT17) | 69 % | 0,70 | 0,66 |
+| **OSNet ajustado con jugadores de SoccerNet** | **91 %** | **0,90** | **0,91** |
+
+El color separa equipos, no jugadores del mismo equipo. El modelo ajustado (`soccercal/reid.py`,
+`tools/train_reid.py`: 27.083 recortes de 1.221 jugadores de otros 57 clips, lotes de compañeros de
+equipo) se usa en la segunda pasada: corta un seguimiento cuando la persona cambia mientras un compañero
+estaba a menos de 3 m, y une los fragmentos del mismo jugador por su aspecto.
 
 Formato verificado: `tests/test_export.py` carga la salida con kloppy, y el visor oficial
 `SkillCorner_Tracking_Viewer.html` la abre sin errores (probado en Chromium: 26 identidades, 61 fotogramas, 10 Hz, portero y posesión).
@@ -376,13 +409,16 @@ salida y con los datos abiertos de SkillCorner:
 ```python
 from soccercal.tactics import Match, plot_control
 m = Match.load("salida")          # o Match.from_result(res)
-plot_control(m, 56, model="spearman")   # "fernandez", "value"
+plot_control(m, 56, model="spearman")   # "fernandez", "value", "soccermap"
 ```
 
 | función | qué calcula | de dónde viene |
 |---|---|---|
 | `pitch_control` | probabilidad de que el equipo con el balón lo gane si se juega a cada punto | modelo de William Spearman (2018) con el código de Laurie Shaw (LaurieOnTracking, *Friends of Tracking*): mismos parámetros y ecuaciones. Comprobado contra su código original en el Bayern–PSG: **diferencia máxima 1·10⁻¹⁵**, y 34 veces más rápido (38 ms frente a 1,3 s por fotograma) porque calcula todo el campo a la vez. El fuera de juego (`offsides=True`, como Shaw) da los mismos jugadores que su `check_offsides` en los 83 fotogramas probados |
-| `space_control` | control del espacio por "zonas de influencia" gaussianas, adelantadas 0,5 s y estiradas en la dirección de carrera, más grandes lejos del balón | Fernández y Bornn, *Wide Open Spaces* (2018). Coincide con una implementación independiente (diferencia 4·10⁻¹⁶) |
+| `space_control` | control del espacio por "zonas de influencia" gaussianas, adelantadas 0,5 s y estiradas en la dirección de carrera, más grandes lejos del balón | Fernández y Bornn, *Wide Open Spaces* (2018): comprobado contra el apéndice del artículo original (ecuaciones 13-21). El radio según la distancia al balón solo existe como figura (Fig. 9): lo hemos ajustado a la figura digitalizada (error 0,05 m); la fórmula `4 + d³/972` de otras implementaciones se separa hasta 0,6 m |
+| `soccermap.pass_success`, `plot_control(..., model="soccermap")` | probabilidad de que un pase desde el balón a cada punto salga bien | SoccerMap (Fernández y Bornn, 2020), arquitectura del artículo, **entrenada aquí** con 15.246 pases de 20 partidos abiertos (SkillCorner, IDSSE, Metrica). En 3.869 pases de 5 partidos que no vio: pérdida logarítmica 0,341 y AUC 0,81, frente a 0,428 / 0,51 de predecir siempre la media. Con tan pocos pases, la regresión logística con rasgos hechos a mano del propio artículo todavía la supera (0,318 / 0,85); el artículo usó 433.000 pases |
+| `space.pitch_value`, `space.space_occupation`, `space.space_generation`, `space.summary` | valor de cada zona según dónde está el balón; ganancia de espacio (SOG, activa / pasiva), pérdida (SOL) y generación de espacio (SGG) por jugador | *Wide Open Spaces*, secciones 4-5, tal como se publicaron. Su "valor del campo" no es una red privada del Barça: el artículo explica cómo entrenarla (influencia de los defensores según el balón) y aquí se ha entrenado igual con datos abiertos |
+| `impute.complete` | añade a los jugadores que el vídeo no enseña nunca (portero, extremo del otro lado), marcados como deducidos, solo para los mapas | portero: red entrenada con datos abiertos, **3,3 m** de error mediano en partidos no vistos (8,9 m con una posición fija; 6,1 m con "8 m por delante de la portería hacia el balón"); jugador de campo: red que mira la forma de sus compañeros y busca el hueco, **12 m** frente a 16 m del centro del equipo (saber qué puesto falta daría 3 m: lo difícil es adivinar el puesto) |
 | `value_map`, `epv_at` | control × EPV: dónde un pase sería a la vez seguro y peligroso | superficie EPV de Laurie Shaw (`soccercal/data/EPV_grid.csv`, licencia MIT) |
 | `control_series` | % del campo (y de lo que ve la cámara) que controla cada equipo en el tiempo | |
 | `render_control_video` | vídeo del mapa de control, un fotograma cada 0,1 s | |
@@ -412,7 +448,8 @@ Diferente / pendiente:
   jugador es visible y está cerca de la cámara (en el clip de prueba a 720p: 7 de 22 jugadores en 14 s;
   en un partido completo y a 1080p se leen muchos más). Un jugador sin dorsal leído que sale mucho rato
   de plano puede volver con otro `id`: habrá más identidades que jugadores. Con dorsal, los fragmentos se
-  unen automáticamente.
+  unen automáticamente, y desde esta versión también por su aspecto (re-identificación ajustada con
+  jugadores de fútbol; IDF1 medio 0,82 en tres clips de SoccerNet, ver "Precisión medida").
 * **El balón.** El detector genérico (COCO) ve el balón con poca confianza y confunde botas blancas o
   flúor, cabezas y letras de las vallas. Por eso: se guardan también las detecciones débiles, se exige
   que el candidato esté en el césped, tenga el tamaño de un balón de 22 cm a esa distancia, no esté
@@ -434,7 +471,12 @@ Diferente / pendiente:
 ## Para desarrolladores
 
 ```bash
-pytest -q                                  # 57 pruebas, ~30 s, no necesitan pesos
+pytest -q                                  # 65 pruebas, ~30 s, no necesitan pesos
+python tools/soccernet_eval.py SNMOT-116 ...   # identidades contra la verdad de SoccerNet
+python tools/reid_benchmark.py SNMOT-116 ...   # apariencia: ¿distingue a compañeros de equipo?
+python tools/open_data.py                     # datos abiertos (SkillCorner, Metrica, IDSSE) para entrenar
+python tools/statsbomb_passes.py              # pases con StatsBomb 360
+python tools/train_soccermap.py | train_pitch_value.py | train_impute.py | train_reid.py
 python tools/synthetic_benchmark.py        # seguimiento con verdad conocida
 python tools/calibration_benchmark.py      # calibración en el clip real
 python tools/make_notebooks.py             # regenera los cuadernos
@@ -460,3 +502,8 @@ Código en `soccercal/`: `hrnet.py` (red), `field_model.py` (puntos del campo), 
   *Wide Open Spaces* (MIT Sloan 2018); entrada de SoccerMap (Fernández y Bornn, ECML-PKDD 2020), canales
   densos como en un-xPass (DTAI, KU Leuven). El código de `tactics.py` está escrito desde los artículos y
   comprobado contra esas implementaciones, no copiado.
+* Modelos entrenados aquí (`soccercal/data`), con datos abiertos que hay que citar: SkillCorner Open Data
+  (MIT), Metrica Sports sample data, IDSSE (Bassek et al., *Scientific Data* 2025, CC BY 4.0), StatsBomb
+  Open Data (uso libre citando a StatsBomb) y SoccerNet-Tracking 2023 (Cioppa et al., uso para
+  investigación). OSNet: Zhou et al. (ICCV 2019), pesos publicados `kaiyangzhou/osnet` (MIT); la
+  arquitectura de `reid.py` está escrita desde el diseño publicado y carga esos pesos sin diferencias.
