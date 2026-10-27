@@ -172,6 +172,11 @@ def split_matches(recs, seed: int) -> dict:
     return part
 
 
+def plain(report):
+    """Python numbers only, so the file opens with ``torch.load(weights_only=True)``."""
+    return json.loads(json.dumps(report, default=float))
+
+
 def run_phase(name: str, net, train, val, lr: float, rounds: int, round_batches: int | None, patience: int, root: Path,
               out: str, batch: int, history: list):
     """Adam with the learning rate cut by 3 when the validation log-loss stops improving; keeps the
@@ -214,7 +219,7 @@ def run_phase(name: str, net, train, val, lr: float, rounds: int, round_batches:
         if mv["log_loss"] < best - 1e-3:
             best, bad = mv["log_loss"], 0
             best_state = {key: v.detach().clone() for key, v in net.state_dict().items()}
-            torch.save({"model": {key: v.half() for key, v in best_state.items()}, "report": {"partial": history}}, out)
+            torch.save({"model": {key: v.half() for key, v in best_state.items()}, "report": plain({"partial": history})}, out)
         else:
             bad += 1
         torch.save({"model": net.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(), "best": best,
@@ -281,7 +286,7 @@ def main():
     }
     print(json.dumps(report["test"], indent=1), json.dumps(report["test_by_source"], indent=1), flush=True)
     json.dump(report, open(root / "soccermap_report.json", "w"), indent=1)
-    torch.save({"model": {k: v.half() for k, v in net.state_dict().items()}, "report": report}, a.out)
+    torch.save({"model": {k: v.half() for k, v in net.state_dict().items()}, "report": plain(report)}, a.out)
     print("saved", a.out)
 
 

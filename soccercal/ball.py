@@ -237,14 +237,16 @@ def _dribbles(raw: list, pos: np.ndarray, det: np.ndarray, t: np.ndarray, min_s:
 
 def ball_timeline(frame_t: np.ndarray, near: np.ndarray, valid: np.ndarray, ball_pos: np.ndarray, ball_det: np.ndarray,
                   out_t: np.ndarray, players: dict, team_of: dict, fps_an: float, carry_s: float = 2.0,
-                  back_s: float = 1.5, keep_poss_s: float = 3.0, poss_dist: float = 1.5, pass_speed: float = 7.0):
+                  back_s: float = 1.5, keep_poss_s: float = 3.0, poss_dist: float = 1.5, pass_speed: float = 7.0,
+                  away_dist: float = 3.0):
     """The ball on the output grid, with possession. Returns a DataFrame (one row per output
     frame): x, y, is_detected, kind ('detected' / 'interpolated' / 'carried' / ''), possession
     player and team.
 
     Where the ball is not seen, the player who has it carries it: for up to ``carry_s`` after
-    it was last seen at his feet, and up to ``back_s`` before it is first seen at the feet of a
-    player who then keeps it (dribbling out of a crowd). ``players``: {output frame: (pids,
+    it was last seen at his feet (unless it has been seen more than ``away_dist`` from him since:
+    he passed or shot it), and up to ``back_s`` before it is first seen at the feet of a player
+    who then keeps it (dribbling out of a crowd). ``players``: {output frame: (pids,
     (n,2) positions)}."""
     import pandas as pd
 
@@ -291,7 +293,7 @@ def ball_timeline(frame_t: np.ndarray, near: np.ndarray, valid: np.ndarray, ball
                         bx[j], by[j], kind[j] = p[0], p[1], "carried"
         k = e
     poss = [None] * n
-    pid, last_seen, cand, cand_n = None, -1e9, None, 0
+    pid, last_seen, cand, cand_n, gone = None, -1e9, None, 0, False
     for k in range(n):  # forward: possession with hysteresis (a new holder must keep it 0.3 s)
         if kind[k] == "detected":
             h = holder(k)
@@ -301,11 +303,14 @@ def ball_timeline(frame_t: np.ndarray, near: np.ndarray, valid: np.ndarray, ball
                 if h == pid or cand_n >= 3 or pid is None:
                     pid = h
                 if h == pid:
-                    last_seen = out_t[k]
+                    last_seen, gone = out_t[k], False
+            p = at(k, pid) if pid is not None and h != pid else None
+            if p is not None and np.hypot(bx[k] - p[0], by[k] - p[1]) > away_dist:
+                gone = True  # seen away from him since: a pass or a shot, he no longer carries it
         if out_t[k] - last_seen > keep_poss_s:
             pid = None
         poss[k] = pid
-        if valid[k] and not kind[k] and pid is not None and out_t[k] - last_seen <= carry_s:
+        if valid[k] and not kind[k] and pid is not None and not gone and out_t[k] - last_seen <= carry_s:
             p = at(k, pid)
             if p is not None:
                 bx[k], by[k], kind[k] = p[0], p[1], "carried"

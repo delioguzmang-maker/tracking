@@ -126,3 +126,11 @@ def test_set_network_numpy_forward_matches_torch():
     with torch.no_grad():
         ref = net(torch.from_numpy(obs[None]))[0].numpy()
     assert np.allclose(set_predict(obs, net.arrays()), ref, atol=1e-5)
+
+
+def test_shipped_soccermap_weights_load_safely():
+    torch = pytest.importorskip("torch")
+    from soccercal import soccermap
+
+    torch.load(soccermap.WEIGHTS, map_location="cpu", weights_only=True)  # plain numbers only in the report
+    assert isinstance(soccermap.load(), torch.nn.Module)

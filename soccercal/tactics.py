@@ -632,7 +632,7 @@ def plot_control(match: Match, frame: int, model: str = "spearman", ax=None, n_g
             ax.text(xy[0] + 1.2, xy[1] + 1.2, txt, fontsize=7, color="white",
                     zorder=7, path_effects=[pe.withStroke(linewidth=2, foreground="k")])
     car = s.pid == s.carrier
-    if car.any():
+    if car.any() and np.isfinite(s.ball).all() and np.hypot(*(s.pos[car][0] - s.ball)) <= 3.0:  # at his feet now
         ax.scatter(*s.pos[car][0], s=280, facecolors="none", edgecolors="k", linewidths=1.2, zorder=6)
     if np.isfinite(s.ball).all():
         ax.scatter(*s.ball, s=32, c=BALL_COLOR, edgecolors="k", linewidths=1.0, zorder=8)

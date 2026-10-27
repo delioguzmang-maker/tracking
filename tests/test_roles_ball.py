@@ -299,3 +299,22 @@ def test_handover_duplicate_frames_are_trimmed():
     new = [(f, np.zeros(2), np.eye(2), 1 if f == 12 else 0, 0.9) for f in range(12, 20)]
     a, b = trim_handovers([old, new], meas, an, 10)
     assert a[-1][0] == 11 and len(b) == 8
+
+
+def test_ball_is_not_carried_after_it_is_seen_leaving_the_player():
+    from soccercal.ball import ball_timeline
+
+    n = 25
+    t = np.arange(n) / 10.0
+    pos = np.full((n, 2), np.nan)
+    pos[:10] = [0.3, 0.0]  # at his feet
+    det = np.isfinite(pos[:, 0])
+    players = {k: (np.array([7]), np.array([[0.0, 0.0]])) for k in range(n)}
+    kwargs = dict(near=np.arange(n), valid=np.ones(n, bool), out_t=t, players=players, team_of={7: 0}, fps_an=10.0)
+    lost = ball_timeline(t, ball_pos=pos, ball_det=det, **kwargs)
+    assert (lost["kind"].iloc[10:30] == "carried").sum() > 10  # unseen right after: he still has it
+    pos[10:12] = [[4.5, 2.0], [9.0, 4.0]]  # a cross: seen flying away, then lost in the air
+    det = np.isfinite(pos[:, 0])
+    cross = ball_timeline(t, ball_pos=pos, ball_det=det, **kwargs)
+    assert not (cross["kind"].iloc[12:] == "carried").any()
+    assert cross["x"].iloc[12:].isna().all()  # unknown, not back at the crosser's feet
