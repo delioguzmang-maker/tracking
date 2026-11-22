@@ -122,14 +122,15 @@ def _embeddings(obs: list, meas: list, an: Analysis, max_iou: float = 1.0, min_c
     return out
 
 
-def split_by_appearance(pieces: list, meas: list, an: Analysis, w: int = 4, thr: float = 0.2,
+def split_by_appearance(pieces: list, meas: list, an: Analysis, w: int = 4, thr: float = 0.25,
                         near: float = 3.0, max_iou: float = 1.0, min_conf: float = 0.0) -> list:
     """Cut a track where the person in it changes. The mean appearance of the ``w`` views before and
     the ``w`` views after a point differ by more than ``thr`` (cosine distance), and a teammate was
     within ``near`` m in between: two players of the same team crossing, the identity switch that
-    neither positions nor shirt colours can see. On held-out SoccerNet clips, 0.9 % of windows of
-    the same player exceed 0.2 and 77 % of switches do; the teammate condition removes most of the
-    former. The cut goes right after the moment the two were closest."""
+    neither positions nor shirt colours can see. On the SoccerNet validation clips
+    (``tools/reid_calibrate.py``), 0.4 % of windows of the same player exceed 0.25 and 58 % of
+    switches do; the teammate condition removes most of the former. The cut goes right after the
+    moment the two were closest."""
     out, stack = [], list(pieces)
     while stack:
         obs = stack.pop()

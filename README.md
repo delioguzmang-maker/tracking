@@ -371,9 +371,28 @@ no se reutiliza la del fotograma calibrado más cercano, que es lo que provoca s
 y velocidades falsas de 4–7 m/s en otros sistemas. En el control del espacio, 0,49 m/s de error mueven
 el punto de reacción de un jugador como mucho 0,35 m (× 0,7 s).
 
-**Identidades con verdad conocida: SoccerNet** (`python tools/soccernet_eval.py`). Tres clips de 30 s del
-conjunto de prueba de SoccerNet-Tracking 2023 (retransmisión 1080p, cada jugador marcado con su identidad,
-equipo y dorsal; el programa no los vio nunca), pasados por el programa entero:
+**Identidades con verdad conocida: SoccerNet** (`python tools/soccernet_eval.py`). Clips de 30 s de
+retransmisión 1080p con cada jugador marcado (identidad, equipo y dorsal), pasados por el programa entero.
+Los umbrales se eligen en **validación** y el **test** se mide una sola vez al final, con partidos distintos:
+
+* validación (para elegir umbrales): SNMOT-187 (córner, partido 11 de SoccerNet-Tracking 2023) y
+  SNGS-024 / SNGS-046 (despeje y falta, partidos 2 y 3 del conjunto *valid* de SoccerNet Game State
+  Reconstruction, misma numeración de partidos). El conjunto de entrenamiento de SoccerNet-Tracking no
+  sirve: con él se ajustó el modelo de apariencia.
+* test (intocable): SNMOT-116 y SNMOT-126 (partido 7) y SNMOT-141 (partido 8).
+
+| ajuste probado en validación (`--set`, IDF1 medio de los 3 clips) | IDF1 |
+|---|---|
+| corte por cambio de aspecto `reid_split` 0,15 / 0,20 / **0,25** / 0,30 | 0,755 / 0,754 / **0,757** / 0,757 |
+| parecido mínimo para unir fragmentos `reid_min_cos` 0,3 / **0,4** / 0,5 | 0,754 / 0,754 / 0,754 |
+| aspecto solo de vistas aisladas (solape < 0,15 con otra caja), con o sin confianza ≥ 0,5 | 0,746 (peor) |
+
+Con 0,25 se corta el 0,4 % de los tramos de un mismo jugador y se encuentra el 58 % de los cambios de
+identidad (`tools/reid_calibrate.py` en validación); con 0,20, el 1,4 % y el 73 %. Quedarse solo con las
+vistas aisladas deja menos vistas por jugador y empeora. La validación sale más baja que el test porque
+incluye una falta difícil (SNGS-046, 0,646); lo que cuenta es comparar ajustes dentro de ella.
+
+Test, medido una vez con los ajustes elegidos:
 
 | clip | IDF1 sin / con apariencia | identidades por jugador | equipo correcto | dorsales bien / mal |
 |---|---|---|---|---|
@@ -381,6 +400,9 @@ equipo y dorsal; el programa no los vio nunca), pasados por el programa entero:
 | SNMOT-126 | 0,951 / **0,951** | 1,41 / 1,41 | 99,9 % | 8 / 1 |
 | SNMOT-141 | 0,773 / **0,790** | 2,05 / 1,95 | 99,6 % | 14 / 0 |
 | media | 0,801 / **0,820** | | | 37 / 2 |
+
+Es la misma cifra que con los umbrales anteriores, que se habían ajustado mirando clips del partido 7
+(dos de ellos de test): aquella fuga no había inflado el resultado.
 
 IDF1 = fracción de las cajas de jugadores atribuidas a la persona correcta durante todo el clip (1 = perfecto).
 Lo que más falla son las melés: en el córner, el seguidor salta entre dos compañeros que se tapan durante
@@ -489,6 +511,11 @@ python tools/synthetic_benchmark.py        # seguimiento con verdad conocida
 python tools/calibration_benchmark.py      # calibración en el clip real
 python tools/make_notebooks.py             # regenera los cuadernos
 ```
+
+Los cuatro modelos propios (`soccercal/data/`, menos de 0,6 MB cada uno) van en git tal cual, con
+excepciones exactas en `.gitignore`; cualquier otro peso, caché de entrenamiento o carpeta de evaluación
+se ignora. No se usa Git LFS: un clon sin git-lfs recibiría punteros de texto en vez de pesos y el
+paquete fallaría al cargarlos. `tests/test_package_data.py` comprueba que siguen siendo pequeños y reales.
 
 Código en `soccercal/`: `hrnet.py` (red), `field_model.py` (puntos del campo), `camera.py` /
 `calibrate.py` / `lines.py` (calibración), `camtrack.py` / `cameras.py` (cámara en el tiempo),

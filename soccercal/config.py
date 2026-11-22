@@ -28,7 +28,7 @@ class Config:
     reid: bool = True  # second look: appearance of every player (soccer OSNet) to cut identity switches
     # and to join the fragments of the same player
     reid_every_s: float = 0.2  # one view per player every this many seconds
-    reid_split: float = 0.2  # appearance change (cosine distance) that cuts a track where a teammate was near
+    reid_split: float = 0.25  # appearance change (cosine distance) that cuts a track where a teammate was near
     reid_min_cos: float = 0.4  # two fragments less alike than this are different players (never joined)
     reid_max_iou: float = 0.3  # appearance only from views whose box overlaps no other box more than this
     reid_min_conf: float = 0.0  # ... and whose detection score is at least this

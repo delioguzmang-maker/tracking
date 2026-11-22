@@ -1,10 +1,13 @@
 """Thresholds of the appearance model, measured on SoccerNet clips with ground truth.
 
-    python tools/reid_calibrate.py path/to/SNMOT-187 [more clips]
+    python tools/reid_calibrate.py path/to/SNMOT-187 path/to/SNGS-024 path/to/SNGS-046
 
-Run it on validation clips only (here: SoccerNet test-split game 11, SNMOT-187/190/193/196), never
-on the clips used for the final score (SNMOT-116/126/141, games 7 and 8): a threshold chosen on the
-test clips makes the test score optimistic. Crops every 0.2 s (as ``Config.reid_every_s``) from
+Run it on validation clips only, never on the clips used for the final score (SNMOT-116/126/141,
+games 7 and 8): a threshold chosen on the test clips makes the test score optimistic. Validation
+here: three clips of three other matches, SNMOT-187 (SoccerNet-Tracking, game 11) and SNGS-024 /
+SNGS-046 (SoccerNet Game State Reconstruction, valid split, games 2 and 3; same match numbering).
+The tracking train split is not used: the appearance network was fine-tuned on it. Crops every
+0.2 s (as ``Config.reid_every_s``) from
 the ground-truth boxes not overlapped by anybody else, embedded with the soccer OSNet, give:
 
 * the cosine between two views of one player and between two teammates: below ``reid_min_cos`` two
