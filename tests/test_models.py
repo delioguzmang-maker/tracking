@@ -134,3 +134,35 @@ def test_shipped_soccermap_weights_load_safely():
 
     torch.load(soccermap.WEIGHTS, map_location="cpu", weights_only=True)  # plain numbers only in the report
     assert isinstance(soccermap.load(), torch.nn.Module)
+
+
+def test_blended_surface_matches_the_per_pass_training_features():
+    torch = pytest.importorskip("torch")
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    from train_soccermap import handcrafted
+
+    from soccercal.soccermap import SoccerMapNet, blend_logits, logistic_logit, pass_success
+    from soccercal.tactics import soccermap_tensor
+
+    torch.manual_seed(0)
+    net = SoccerMapNet(13).eval()
+    rng = np.random.default_rng(3)
+    blend = {"mu": rng.normal(0, 0.3, 13).tolist(), "sd": rng.uniform(0.2, 1, 13).tolist(),
+             "w": rng.normal(0, 1, 13).tolist(), "b": 0.5, "coef": [0.8, 0.5], "bias": -0.2}
+    for right in ((True, False), (False, True)):
+        s = _snap(right)
+        s.carrier = 3
+        surf = pass_success(s, team=0, model=net, blend=blend)
+        iy, ix = 20, 70  # a cell in the frame where team 0 attacks +x
+        with torch.no_grad():
+            z = net(torch.from_numpy(soccermap_tensor(s, team=0)[None])).numpy()[0, 0, iy, ix]
+        sgn = 1.0 if right[0] else -1.0
+        dest = np.array([surf.xgrid[ix], surf.ygrid[iy]]) * sgn  # that cell in pitch coordinates
+        r = {"pos": s.pos, "team": s.team, "att": 0, "pid": s.pid, "passer": 3, "ball": s.ball, "dest": dest,
+             "right": right, "pitch": s.pitch}
+        want = 1 / (1 + np.exp(-blend_logits(z, logistic_logit(handcrafted(r)[None], blend)[0], blend)))
+        got = surf.values[iy, ix] if right[0] else surf.values[67 - iy, 103 - ix]
+        assert np.isclose(got, want, atol=1e-5), (right, got, want)

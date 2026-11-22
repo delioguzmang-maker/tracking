@@ -23,7 +23,7 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from soccercal.soccermap import SoccerMapNet  # noqa: E402
+from soccercal.soccermap import SoccerMapNet, blend_logits, logistic_logit, pass_features  # noqa: E402
 from soccercal.tactics import Snapshot, soccermap_tensor  # noqa: E402
 
 GRID = (68, 104)
@@ -108,28 +108,17 @@ def metrics(p: np.ndarray, y: np.ndarray, bins: int = 10) -> dict:
 
 
 def handcrafted(r) -> np.ndarray:
-    """The paper's logistic-baseline features: origin and destination, distance, angles to goal,
-    opponents near the destination and along the pass line (attacking towards +x)."""
+    """The paper's logistic-baseline features of a pass (``soccermap.pass_features``, attacking +x)."""
     s = 1.0 if r["right"][r["att"]] else -1.0
-    L, W = r["pitch"]
-    o, d = r["ball"] * s, r["dest"] * s
     opp = r["pos"][r["team"] != r["att"]] * s
     mate = r["pos"][(r["team"] == r["att"]) & (r["pid"] != r["passer"])] * s
-    seg = d - o
-    t = np.clip(((opp - o) @ seg) / max(seg @ seg, 1e-6), 0, 1)
-    line = np.linalg.norm(opp - (o + t[:, None] * seg), axis=1).min()
-    goal = np.array([L / 2, 0.0])
-    ang = lambda q: abs(np.arctan2(goal[1] - q[1], goal[0] - q[0]))  # noqa: E731
-    dd_opp = np.linalg.norm(opp - d, axis=1)
-    dd_mate = np.linalg.norm(mate - d, axis=1) if len(mate) else np.array([15.0])
-    return np.array([o[0] / L, o[1] / W, d[0] / L, d[1] / W, np.linalg.norm(seg) / 30, ang(o), ang(d),
-                     min(line, 10) / 10, min(dd_opp.min(), 15) / 15, min(dd_mate.min(), 15) / 15,
-                     (dd_opp < 5).sum() / 3, (dd_mate < 5).sum() / 3, abs(d[1]) / W], np.float32)
+    return pass_features(r["ball"] * s, r["dest"] * s, opp, mate, r["pitch"])[0]
 
 
-def fit_logistic(Xtr, ytr, Xte):
+def fit_logistic(Xtr, ytr) -> dict:
+    """L2-regularised logistic regression on standardised features: {mu, sd, w, b} (plain lists)."""
     mu, sd = Xtr.mean(0), Xtr.std(0) + 1e-6
-    A = torch.tensor((Xtr - mu) / sd)
+    A = torch.tensor((Xtr - mu) / sd, dtype=torch.float32)
     w = torch.zeros(A.shape[1], requires_grad=True)
     b = torch.zeros(1, requires_grad=True)
     opt = torch.optim.LBFGS([w, b], max_iter=500)
@@ -141,8 +130,29 @@ def fit_logistic(Xtr, ytr, Xte):
         loss.backward()
         return loss
     opt.step(closure)
-    with torch.no_grad():
-        return torch.sigmoid(torch.tensor((Xte - mu) / sd) @ w + b).numpy()
+    return {"mu": mu.tolist(), "sd": sd.tolist(), "w": w.detach().numpy().tolist(), "b": float(b.detach())}
+
+
+def sigmoid(z):
+    return 1.0 / (1.0 + np.exp(-z))
+
+
+def logit(p):
+    p = np.clip(p, 1e-6, 1 - 1e-6)
+    return np.log(p / (1 - p))
+
+
+def fit_blend(net, part) -> tuple[dict, dict]:
+    """The logistic baseline (fitted on the training passes) and the weights that blend its logit
+    with the network's (fitted on the validation passes). Returns the blend and the test metrics."""
+    y = {k: np.array([r["y"] for r in part[k]], float) for k in part}
+    H = {k: np.stack([handcrafted(r) for r in part[k]]) for k in part}
+    lr = fit_logistic(H["train"], y["train"])
+    Z = {k: np.c_[logit(predict(net, part[k])), logistic_logit(H[k], lr)] for k in ("val", "test")}
+    m = fit_logistic(Z["val"], y["val"])
+    coef = np.array(m["w"]) / np.array(m["sd"])  # back to raw logits
+    blend = {**lr, "coef": coef.tolist(), "bias": float(m["b"] - (coef * np.array(m["mu"])).sum())}
+    return blend, metrics(sigmoid(blend_logits(Z["test"][:, 0], Z["test"][:, 1], blend)), y["test"])
 
 
 # ------------------------------------------------------------------------------------------ training
@@ -238,6 +248,7 @@ def main():
     ap.add_argument("--threads", type=int, default=3)
     ap.add_argument("--out", default=str(Path(__file__).resolve().parents[1] / "soccercal" / "data" / "soccermap_pass_success.pt"))
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--blend-only", action="store_true", help="fit only the blend for the network already in --out")
     a = ap.parse_args()
     torch.manual_seed(a.seed)
     np.random.seed(a.seed)
@@ -258,6 +269,16 @@ def main():
               sorted({f"{r['source']}:{r['match']}" for r in rr}), flush=True)
     torch.set_num_threads(a.threads)
     net = SoccerMapNet(13).to(memory_format=torch.channels_last)
+    if a.blend_only:
+        state = torch.load(a.out, map_location="cpu", weights_only=True)
+        net.load_state_dict({k: v.float() for k, v in state["model"].items()})
+        state["blend"], m_blend = fit_blend(net, part)
+        state["blend"] = plain(state["blend"])
+        state["report"]["test"]["blend"] = m_blend
+        print("test, blend fitted on validation:", m_blend, flush=True)
+        torch.save(state, a.out)
+        print("saved", a.out)
+        return
     n_par = sum(p.numel() for p in net.parameters())
     history: list = []
     yt = np.array([r["y"] for r in part["test"]], float)
@@ -272,21 +293,22 @@ def main():
     run_phase("B", net, part["train"], part["val"], 2e-4 if extra else 1e-3, 25, None, 4, root, a.out, a.batch, history)
     p_sm = predict(net, part["test"])
     ytr = np.array([r["y"] for r in part["train"]], float)
-    Htr = np.stack([handcrafted(r) for r in part["train"]])
     Hte = np.stack([handcrafted(r) for r in part["test"]])
+    blend, m_blend = fit_blend(net, part)  # carries the logistic baseline fitted on the training passes
     src = np.array([r["source"] for r in part["test"]])
     report = {
         "data": {s: {"passes": len(rr), "completed": round(float(np.mean([r["y"] for r in rr])), 3),
                      "matches": sorted({f"{r['source']}:{r['match']}" for r in rr})} for s, rr in part.items()},
         "extra_passes": len(extra), "extra_matches": len({r["match"] for r in extra}),
-        "test": {"naive": metrics(np.full(len(yt), ytr.mean()), yt), "logistic": metrics(fit_logistic(Htr, ytr, Hte), yt),
-                 "soccermap": metrics(p_sm, yt), **phases},
+        "test": {"naive": metrics(np.full(len(yt), ytr.mean()), yt), "logistic": metrics(sigmoid(logistic_logit(Hte, blend)), yt),
+                 "soccermap": metrics(p_sm, yt), "blend": m_blend, **phases},
         "test_by_source": {s_: metrics(p_sm[src == s_], yt[src == s_]) for s_ in sorted(set(src))},
         "parameters": int(n_par), "history": history,
     }
     print(json.dumps(report["test"], indent=1), json.dumps(report["test_by_source"], indent=1), flush=True)
     json.dump(report, open(root / "soccermap_report.json", "w"), indent=1)
-    torch.save({"model": {k: v.half() for k, v in net.state_dict().items()}, "report": plain(report)}, a.out)
+    torch.save({"model": {k: v.half() for k, v in net.state_dict().items()}, "blend": plain(blend),
+                "report": plain(report)}, a.out)
     print("saved", a.out)
 
 
