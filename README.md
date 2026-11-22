@@ -408,14 +408,15 @@ IDF1 = fracción de las cajas de jugadores atribuidas a la persona correcta dura
 Lo que más falla son las melés: en el córner, el seguidor salta entre dos compañeros que se tapan durante
 1–2 s; cuando no se ven (cajas superpuestas) tampoco hay apariencia que comparar.
 
-**Distinguir a dos compañeros de equipo por su aspecto** (`python tools/reid_benchmark.py`, 4 clips de
-prueba de SoccerNet, recortes separados al menos 1 s):
+**Distinguir a dos compañeros de equipo por su aspecto** (`python tools/reid_benchmark.py`, recortes
+separados al menos 1 s). Primera cifra: los 3 clips de validación; entre paréntesis, 4 clips del conjunto
+de test medidos antes:
 
 | descriptor | acierto (el más parecido es el mismo jugador) | AUC mismo / otro compañero | AUC detectar un cambio de identidad |
 |---|---|---|---|
-| color de la camiseta (lo que se usaba) | 39 % | 0,64 | 0,59 |
-| OSNet publicado (MSMT17) | 69 % | 0,70 | 0,66 |
-| **OSNet ajustado con jugadores de SoccerNet** | **91 %** | **0,90** | **0,91** |
+| color de la camiseta (lo que se usaba) | 32 % (39 %) | 0,59 (0,64) | 0,53 (0,59) |
+| OSNet publicado (MSMT17) | 45 % (69 %) | 0,63 (0,70) | 0,58 (0,66) |
+| **OSNet ajustado con jugadores de SoccerNet** | **81 % (91 %)** | **0,82 (0,90)** | **0,80 (0,91)** |
 
 El color separa equipos, no jugadores del mismo equipo. El modelo ajustado (`soccercal/reid.py`,
 `tools/train_reid.py`: 27.083 recortes de 1.221 jugadores de otros 57 clips, lotes de compañeros de
