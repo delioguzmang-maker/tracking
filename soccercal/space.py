@@ -125,7 +125,7 @@ def space_occupation(match: Match, team: int, window_s: float = 3.0, eps: float 
                          "kind": "SOG" if G >= eps and G > 0 else "SOL" if G <= -eps and G < 0 else "",
                          "active": bool(speed.get(pid, 0.0) > jog), "in_front": ahead,
                          "dist_ball": float(np.hypot(*(s0.pos[j] - s0.ball))) if np.isfinite(s0.ball).all() else np.nan})
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=["frame", "t", "player_id", "gain", "kind", "active", "in_front", "dist_ball"])
 
 
 def space_generation(match: Match, team: int, window_s: float = 3.0, close: float = 5.0, attract: float = 3.0,

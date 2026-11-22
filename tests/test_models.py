@@ -166,3 +166,14 @@ def test_blended_surface_matches_the_per_pass_training_features():
         want = 1 / (1 + np.exp(-blend_logits(z, logistic_logit(handcrafted(r)[None], blend)[0], blend)))
         got = surf.values[iy, ix] if right[0] else surf.values[67 - iy, 103 - ix]
         assert np.isclose(got, want, atol=1e-5), (right, got, want)
+
+
+def test_space_summary_on_a_clip_too_short_for_any_window(monkeypatch):
+    from soccercal import space
+
+    rng = np.random.default_rng(0)
+    monkeypatch.setattr(space, "_W", {"W1": rng.normal(0, 1, (4, 8)), "b1": np.zeros(8), "W2": rng.normal(0, 1, (8, 1)),
+                                      "b2": np.zeros(1)})
+    m = _match_without(gk_team=-1, n_out=10)  # 3 s of play: a 10-s window never has enough frames
+    assert len(space.space_occupation(m, 0, window_s=10.0)) == 0
+    assert len(space.summary(m, 0, window_s=10.0)) == 0  # empty, not a KeyError

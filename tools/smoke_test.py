@@ -55,7 +55,8 @@ def check_outputs(out: Path, render: bool = True) -> list[tuple[str, bool, str]]
         assert seen[["x", "y"]].abs().max().max() < 80, "positions far outside the pitch"
         per = seen.groupby("frame").size()
         assert per.median() >= 4, f"only {per.median():.0f} players seen per frame"
-        assert set(t["team"].dropna().unique()) & {0, 1}, "no team assigned"
+        teams = set(t.loc[t["role"].isin(["player", "goalkeeper"]), "team"].dropna()) - {"other"}
+        assert len(teams) == 2, f"teams found: {sorted(teams)}"
         return f"{t['player_id'].nunique()} ids, median {per.median():.0f} seen per frame"
 
     def ball():
