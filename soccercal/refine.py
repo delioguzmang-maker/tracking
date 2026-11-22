@@ -23,17 +23,7 @@ import numpy as np
 from collections import Counter
 
 from .analysis import Analysis, iter_frames
-from .detect import BALL, Detections, ball_colour
-
-
-def _iou(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    x1 = np.maximum(a[:, None, 0], b[None, :, 0])
-    y1 = np.maximum(a[:, None, 1], b[None, :, 1])
-    x2 = np.minimum(a[:, None, 2], b[None, :, 2])
-    y2 = np.minimum(a[:, None, 3], b[None, :, 3])
-    inter = np.clip(x2 - x1, 0, None) * np.clip(y2 - y1, 0, None)
-    area = lambda r: (r[:, 2] - r[:, 0]) * (r[:, 3] - r[:, 1])  # noqa: E731
-    return inter / (area(a)[:, None] + area(b)[None] - inter + 1e-9)
+from .detect import BALL, Detections, ball_colour, box_iou as _iou
 
 
 def ball_search_windows(an: Analysis, cams: list, ball_pos: np.ndarray, ball_det: np.ndarray, imgsz: int = 1280,

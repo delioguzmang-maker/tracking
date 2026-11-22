@@ -33,6 +33,17 @@ class Detections:
         return Detections(np.zeros((0, 4)), np.zeros(0), np.zeros(0, int))
 
 
+def box_iou(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """(n, m) intersection over union of xyxy boxes ``a`` (n, 4) and ``b`` (m, 4)."""
+    x1 = np.maximum(a[:, None, 0], b[None, :, 0])
+    y1 = np.maximum(a[:, None, 1], b[None, :, 1])
+    x2 = np.minimum(a[:, None, 2], b[None, :, 2])
+    y2 = np.minimum(a[:, None, 3], b[None, :, 3])
+    inter = np.clip(x2 - x1, 0, None) * np.clip(y2 - y1, 0, None)
+    area = lambda r: (r[:, 2] - r[:, 0]) * (r[:, 3] - r[:, 1])  # noqa: E731
+    return inter / (area(a)[:, None] + area(b)[None] - inter + 1e-9)
+
+
 PERSON_NAMES = {"person", "player", "goalkeeper", "referee"}
 BALL_NAMES = {"sports ball", "ball", "football"}
 

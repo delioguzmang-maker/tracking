@@ -4,8 +4,21 @@ __pycache__/
 .ipynb_checkpoints/
 .pytest_cache/
 salida*/
-*.pt
 *.mp4
 *.pkl.gz
 !docs/*.mp4
-!soccercal/data/*.pt
+
+# model weights, checkpoints and training caches stay out of git ...
+*.pt
+*.pth
+*.onnx
+*.npz
+*.pkl
+open_data/
+soccernet_eval/
+smoke/
+# ... except the small trained models the package ships (tests/test_package_data.py checks their size)
+!soccercal/data/soccermap_pass_success.pt
+!soccercal/data/osnet_x0_25_soccer.pt
+!soccercal/data/impute.npz
+!soccercal/data/pitch_value.npz

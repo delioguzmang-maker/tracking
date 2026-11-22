@@ -318,3 +318,18 @@ def test_ball_is_not_carried_after_it_is_seen_leaving_the_player():
     cross = ball_timeline(t, ball_pos=pos, ball_det=det, **kwargs)
     assert not (cross["kind"].iloc[12:] == "carried").any()
     assert cross["x"].iloc[12:].isna().all()  # unknown, not back at the crosser's feet
+
+
+def test_merge_by_number_needs_a_possible_run():
+    def three():
+        a = Identity(1, 0, "player", [_tl(1, 0, 50)], number=9, number_votes=4)
+        near = Identity(2, 0, "player", [_tl(2, 60, 90)], number=9, number_votes=2)  # 1 s later, 5 m away
+        near.tracklets[0].z[:] = [5.0, 0.0]
+        far = Identity(3, 0, "player", [_tl(3, 100, 130)], number=9, number_votes=1)  # 1 s after, 60 m away
+        far.tracklets[0].z[:] = [65.0, 0.0]
+        return [a, near, far]
+
+    out = {i.pid: i for i in merge_by_number(three(), fps=10.0)}
+    assert set(out) == {1, 3} and len(out[1].tracklets) == 2
+    assert out[3].number is None  # 60 m in a second: a misread 9, not the same player
+    assert len(merge_by_number(three())) == 1  # without fps: no speed check

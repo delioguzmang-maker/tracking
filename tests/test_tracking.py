@@ -192,3 +192,23 @@ def test_split_by_appearance_cuts_a_switch_between_teammates():
     assert [len(p) for p in pieces] == [15, 15] or [len(p) for p in pieces] == [16, 14] or [len(p) for p in pieces] == [14, 16]
     assert len(split_by_appearance(*scene(1.0, False))) == 1  # same player all along
     assert len(split_by_appearance(*scene(8.0, True))) == 1  # no teammate close: not a crossing
+
+
+def test_appearance_only_from_isolated_confident_views():
+    from types import SimpleNamespace
+
+    from soccercal.detect import PERSON, Detections
+    from soccercal.players import _embeddings
+
+    e = np.eye(512)[0].astype(np.float16)
+    lone = np.array([[100, 100, 140, 200], [400, 100, 440, 200]], float)  # far apart
+    crossing = np.array([[100, 100, 140, 200], [110, 100, 150, 200]], float)  # IoU 0.6
+    frames, meas, obs = [], [], []
+    for f, (boxes, score) in enumerate([(lone, 0.9), (crossing, 0.9), (lone, 0.3)]):
+        frames.append(SimpleNamespace(reid={0: e}, det=Detections(boxes, np.array([score, 0.9]), np.full(2, PERSON))))
+        meas.append(SimpleNamespace(det_idx=np.array([0, 1])))
+        obs.append((f, np.zeros(2), np.eye(2), 0, score))
+    an = SimpleNamespace(frames=frames)
+    assert [k for k, _ in _embeddings(obs, meas, an)] == [0, 1, 2]  # no filter
+    assert [k for k, _ in _embeddings(obs, meas, an, max_iou=0.15)] == [0, 2]  # the crossing view is dropped
+    assert [k for k, _ in _embeddings(obs, meas, an, max_iou=0.15, min_conf=0.5)] == [0]

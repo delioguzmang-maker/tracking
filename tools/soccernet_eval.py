@@ -1,6 +1,7 @@
 """soccercal on SoccerNet tracking clips, scored against their ground truth.
 
-    python tools/soccernet_eval.py path/to/SNMOT-116 [more clips] --work out_dir
+    python tools/soccernet_eval.py path/to/SNMOT-116 [more clips] --work out_dir [--tag name]
+                                   [--set reid_split=0.25 --set reid_min_cos=0.4]
 
 Each clip (SoccerNet-Tracking 2023: 30 s of broadcast video at 25 fps, 1080p, every player boxed
 with a persistent identity, his team and shirt number) is turned into a video and run through
@@ -13,6 +14,13 @@ boxes frame by frame (IoU >= 0.5), and:
 * team accuracy (our two teams mapped to left / right) and shirt numbers read right / wrong.
 
 Only players and goalkeepers are scored (referees, staff and the ball are not players).
+
+Each clip's scores are saved as soon as it is done (``--work/results/<tag>/<clip>.json``, with the
+settings used); a rerun skips the clips already scored with the same settings, so an interrupted
+evaluation resumes where it stopped. ``--set`` changes tracking settings (``Config`` fields) for a
+variant; the saved analysis is reused when only tracking settings change. Before the long run, the
+whole chain runs on the first 5 s of the first clip (``tools/smoke_test.py``; ``--smoke 0`` skips it).
+Tune settings on validation clips and score the test clips once, with the settings chosen.
 """
 from __future__ import annotations
 
@@ -28,6 +36,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 def clip_to_video(d: Path, out: Path, fps: float = 25.0) -> Path:
@@ -133,29 +142,62 @@ def score(res, gt, info, min_iou: float = 0.5) -> dict:
             "numbers_right": int(right), "numbers_wrong": int(wrong), "players_with_number_in_gt": known}
 
 
+def _value(v: str):
+    for cast in (int, float):
+        try:
+            return cast(v)
+        except ValueError:
+            pass
+    return {"true": True, "false": False, "none": None}.get(v.lower(), v)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("clips", nargs="+")
     ap.add_argument("--work", default="soccernet_eval")
+    ap.add_argument("--tag", default="default", help="name of this variant (results/<tag>/)")
+    ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="a Config field for this variant")
+    ap.add_argument("--force", action="store_true", help="score again the clips already scored")
+    ap.add_argument("--smoke", type=float, default=5.0, help="seconds of the first clip to run first (0: skip)")
     a = ap.parse_args()
     import soccercal
     from soccercal.config import Config
 
     work = Path(a.work)
     work.mkdir(parents=True, exist_ok=True)
-    report = {}
-    for d in map(Path, a.clips):
+    overrides = dict(kv.split("=", 1) for kv in a.set)
+    overrides = {k: _value(v) for k, v in overrides.items()}
+    cfg = Config(players_per_team=11, **overrides)
+    res_dir = work / "results" / a.tag
+    res_dir.mkdir(parents=True, exist_ok=True)
+    clips = list(map(Path, a.clips))
+    todo = []
+    for d in clips:
+        f = res_dir / f"{d.name}.json"
+        if f.exists() and not a.force and json.load(open(f)).get("settings") == overrides:
+            print(d.name, "already scored:", f, flush=True)
+        else:
+            todo.append(d)
+    if todo and a.smoke > 0:
+        from smoke_test import smoke
+
+        video = clip_to_video(todo[0], work / f"{todo[0].name}.mp4")
+        if not smoke(video, work / "smoke" / todo[0].name, a.smoke, render=False, cfg=cfg):
+            sys.exit("smoke test failed: fix it before the long run")
+    for d in todo:
         video = clip_to_video(d, work / f"{d.name}.mp4")
-        res = soccercal.run(video, work / d.name, Config(players_per_team=11), render=False, progress=False)
+        res = soccercal.run(video, work / d.name, cfg, render=False, progress=False)
         gt, info = ground_truth(d)
-        report[d.name] = score(res, gt, info)
-        print(d.name, json.dumps(report[d.name]), flush=True)
+        scores = score(res, gt, info)
+        json.dump({"settings": overrides, "scores": scores}, open(res_dir / f"{d.name}.json", "w"), indent=1)
+        print(d.name, json.dumps(scores), flush=True)
+    report = {d.name: json.load(open(res_dir / f"{d.name}.json"))["scores"] for d in clips}
     keys = ["IDF1", "ID_precision", "ID_recall", "identities_per_player", "team_accuracy"]
-    report["mean"] = {k: round(float(np.mean([r[k] for r in report.values()])), 3) for k in keys}
-    report["total"] = {k: int(sum(r[k] for n, r in report.items() if n != "mean"))
-                       for k in ("ID_switches", "numbers_right", "numbers_wrong")}
+    report["mean"] = {k: round(float(np.mean([report[d.name][k] for d in clips])), 3) for k in keys}
+    report["total"] = {k: int(sum(report[d.name][k] for d in clips)) for k in ("ID_switches", "numbers_right", "numbers_wrong")}
+    report["settings"] = overrides
     print(json.dumps(report, indent=1))
-    json.dump(report, open(work / "report.json", "w"), indent=1)
+    json.dump(report, open(res_dir / "report.json", "w"), indent=1)
 
 
 if __name__ == "__main__":

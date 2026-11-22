@@ -9,7 +9,7 @@ from . import pitch
 from .analysis import Analysis
 from .camera import Camera
 from .config import Config
-from .detect import DESC_DIM
+from .detect import DESC_DIM, box_iou
 from .jersey import number_hint, numbers_compatible, vote_number
 from .stitch import StitchConfig, TeamMotion, Tracklet, link_cost, stitch
 from .teams import OTHER, TeamModel, decide, fit_team_model
@@ -97,21 +97,33 @@ class TrackingOutput:
     motion: TeamMotion | None = None  # on-screen mean velocity per team (for extrapolation)
 
 
-def _embeddings(obs: list, meas: list, an: Analysis) -> list:
-    """[(index in ``obs``, unit embedding)] for the observations that have an appearance embedding."""
+def _embeddings(obs: list, meas: list, an: Analysis, max_iou: float = 1.0, min_conf: float = 0.0) -> list:
+    """[(index in ``obs``, unit embedding)] for the observations that have an appearance embedding,
+    from views where the player stands apart (box IoU with every other box <= ``max_iou``) and
+    was detected with a score >= ``min_conf``: a box on two crossing players mixes their looks."""
     out = []
     for k, o in enumerate(obs):
-        r = getattr(an.frames[o[0]], "reid", None)
-        if r:
-            e = r.get(int(meas[o[0]].det_idx[o[3]]))
-            if e is not None:
-                e = e.astype(np.float32)
-                out.append((k, e / (np.linalg.norm(e) + 1e-9)))
+        fd = an.frames[o[0]]
+        r = getattr(fd, "reid", None)
+        if not r:
+            continue
+        j = int(meas[o[0]].det_idx[o[3]])
+        e = r.get(j)
+        if e is None:
+            continue
+        if max_iou < 1.0 or min_conf > 0.0:
+            det = fd.det.persons()
+            if det.scores[j] < min_conf:
+                continue
+            if len(det.boxes) > 1 and box_iou(det.boxes[j:j + 1], np.delete(det.boxes, j, 0)).max() > max_iou:
+                continue
+        e = e.astype(np.float32)
+        out.append((k, e / (np.linalg.norm(e) + 1e-9)))
     return out
 
 
 def split_by_appearance(pieces: list, meas: list, an: Analysis, w: int = 4, thr: float = 0.2,
-                        near: float = 3.0) -> list:
+                        near: float = 3.0, max_iou: float = 1.0, min_conf: float = 0.0) -> list:
     """Cut a track where the person in it changes. The mean appearance of the ``w`` views before and
     the ``w`` views after a point differ by more than ``thr`` (cosine distance), and a teammate was
     within ``near`` m in between: two players of the same team crossing, the identity switch that
@@ -121,7 +133,7 @@ def split_by_appearance(pieces: list, meas: list, an: Analysis, w: int = 4, thr:
     out, stack = [], list(pieces)
     while stack:
         obs = stack.pop()
-        views = _embeddings(obs, meas, an)
+        views = _embeddings(obs, meas, an, max_iou, min_conf)
         cut, best = None, thr
         if len(views) >= 2 * w:
             E = np.array([e for _, e in views])
@@ -200,7 +212,8 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
         labs = np.array([meas[o[0]].label[o[3]] for o in t.obs])
         pieces += [t.obs[a:b] for a, b in split_by_team(labs)]
     pieces = trim_handovers(pieces, meas, an, int(round(0.4 * fps)))
-    pieces = split_by_appearance(pieces, meas, an)
+    pieces = split_by_appearance(pieces, meas, an, thr=cfg.reid_split, max_iou=cfg.reid_max_iou,
+                                 min_conf=cfg.reid_min_conf)
     tls = []
     for k, obs in enumerate(pieces, start=1):
         if len(obs) < 3:
@@ -226,7 +239,7 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
         if good.any():
             md = descs[good].mean(0)
             tl.desc = md / (np.linalg.norm(md) + 1e-9)
-        E = _embeddings(obs, meas, an)
+        E = _embeddings(obs, meas, an, cfg.reid_max_iou, cfg.reid_min_conf)
         if len(E) >= 2:
             me = np.mean([e for _, e in E], 0)
             tl.reid = me / (np.linalg.norm(me) + 1e-9)
@@ -248,7 +261,7 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
             tl.number, _ = vote_number(tl.jersey_reads, allowed=allowed.get(tl.team))
 
     # ---- stitching into identities
-    scfg = StitchConfig(max_gap_s=cfg.stitch_max_gap_s, **cfg.extra.get("stitch", {}))
+    scfg = StitchConfig(**{"max_gap_s": cfg.stitch_max_gap_s, "reid_min": cfg.reid_min_cos, **cfg.extra.get("stitch", {})})
     motion = TeamMotion(tls, fps, n)
     chains = stitch(tls, fps, scfg, n_frames=n, motion=motion)
     idents = []
@@ -271,12 +284,12 @@ def track_players(an: Analysis, cams: list, cfg: Config | None = None, progress:
             # lives outside the lines: coach, assistant referee, substitute, ball boy -> not a player
             ident.team, ident.role = OTHER, "staff"
         idents.append(ident)
-    idents = merge_by_number(idents)
+    idents = merge_by_number(idents, fps, scfg.vmax)
     _assign_goalkeepers(idents, cfg)
     mark_assistant_referees(idents, cfg)
     idents = merge_unique_roles(idents)
     idents = fill_roster(idents, cfg, fps, motion, scfg, allowed_numbers=allowed)
-    idents = merge_by_number(idents)  # numbers were re-voted on the joined identities
+    idents = merge_by_number(idents, fps, scfg.vmax)  # numbers were re-voted on the joined identities
     for ident in idents:
         _trajectory(ident, fps)
 
@@ -345,9 +358,8 @@ def trim_handovers(pieces: list, meas: list, an: Analysis, max_overlap: int, min
             both = [(at[o[0]], o) for o in b if o[0] in at]
             if not both:
                 continue
-            from .refine import _iou
 
-            ious = [float(_iou(box(x)[None], box(y)[None])[0, 0]) for x, y in both]
+            ious = [float(box_iou(box(x)[None], box(y)[None])[0, 0]) for x, y in both]
             if np.median(ious) >= min_iou:
                 pieces[i] = [o for o in a if o[0] < b0]
                 a = pieces[i]
@@ -607,11 +619,24 @@ def fill_roster(idents: list[Identity], cfg: Config, fps: float, motion: TeamMot
     return sorted(out, key=lambda i: i.pid)
 
 
-def merge_by_number(idents: list[Identity]) -> list[Identity]:
-    """Fragments of one player that carry the same team + shirt number and never appear at
-    the same time are the same person: merge them (the kinematic stitcher could not, e.g.
-    after a long time off-screen). Two identities with the same number *at the same time*
-    are a conflict: the one with fewer votes loses its number."""
+def reachable(a: list, b: list, fps: float, vmax: float = 9.0, slack: float = 3.0) -> bool:
+    """Can the tracklets ``a`` and ``b`` (never at the same time) be one player? At every hand-over
+    between them in time, the distance covered must be possible at ``vmax`` m/s (+ ``slack`` m)."""
+    seq = sorted([(t, 0) for t in a] + [(t, 1) for t in b], key=lambda x: x[0].start)
+    for (t, u), (t2, u2) in zip(seq[:-1], seq[1:]):
+        if u != u2:
+            dt = (t2.start - t.end) / fps
+            if np.linalg.norm(np.asarray(t2.z[0]) - np.asarray(t.z[-1])) > vmax * max(dt, 0.0) + slack:
+                return False
+    return True
+
+
+def merge_by_number(idents: list[Identity], fps: float | None = None, vmax: float = 9.0) -> list[Identity]:
+    """Fragments of one player that carry the same team + shirt number, never appear at the same
+    time and could have run from one to the other (``reachable``, when ``fps`` is given) are the
+    same person: merge them (the kinematic stitcher could not, e.g. after a long time off-screen).
+    Two identities with the same number *at the same time* are a conflict: the one with fewer votes
+    loses its number."""
     groups: dict[tuple, list[Identity]] = {}
     for ident in idents:
         if ident.number is not None and ident.team in (0, 1) and ident.role != "staff":
@@ -622,12 +647,16 @@ def merge_by_number(idents: list[Identity]) -> list[Identity]:
         keep = []
         for ident in g:
             fr = set(int(f) for t in ident.tracklets for f in t.frames)
-            host = next((k for k in keep if not fr & k[1]), None)
-            if host is None:
+            free = [k for k in keep if not fr & k[1]]
+            if not free:
                 if keep:  # overlaps every kept identity with that number: its reading is wrong
                     ident.number = None
                 else:
                     keep.append((ident, fr))
+                continue
+            host = next((k for k in free if fps is None or reachable(k[0].tracklets, ident.tracklets, fps, vmax)), None)
+            if host is None:  # too far away to be the same player: its reading is wrong
+                ident.number = None
                 continue
             host[0].tracklets = sorted(host[0].tracklets + ident.tracklets, key=lambda t: t.start)
             host[0].number_votes += ident.number_votes
