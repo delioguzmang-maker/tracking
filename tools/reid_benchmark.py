@@ -14,7 +14,6 @@ window finds them.
 from __future__ import annotations
 
 import argparse
-import configparser
 import json
 import sys
 from pathlib import Path
@@ -23,21 +22,20 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from soccercal.detect import DESC_DIM, grass_reference, jersey_descriptor  # noqa: E402
 from soccercal.reid import Embedder  # noqa: E402
 
 
 def load_clip(d: Path, min_h: int = 50, max_iou: float = 0.2, every: int = 5, per_track: int = 30):
-    ini = configparser.ConfigParser()
-    ini.read(d / "gameinfo.ini")
-    roles = {}
-    for k, v in ini["Sequence"].items():
-        if k.startswith("trackletid_"):
-            role, _, num = v.strip().partition(";")
-            if "team left" in role or "team right" in role:
-                roles[int(k.split("_")[1])] = ("L" if "left" in role else "R", num)
-    gt = np.loadtxt(d / "gt" / "gt.txt", delimiter=",")
+    """Crops of the ground-truth players every ``every`` frames (0.2 s at 25 fps), not overlapped by
+    anybody else (SoccerNet-Tracking or Game State Reconstruction clips)."""
+    from soccernet_eval import ground_truth
+
+    gt, info = ground_truth(d, all_people=True)  # every person counts as an overlap
+    roles = {t: ("L" if side == "left" else "R", num) for t, (side, num, _) in info.items()}
     frames = sorted(int(p.stem) for p in (d / "img1").glob("*.jpg"))
+    frames = [f for f in frames if (f - 1) % every == 0]  # also right for clips downloaded already subsampled
     crops = []
     for f in frames:
         rows = gt[gt[:, 0] == f]

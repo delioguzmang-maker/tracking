@@ -3,7 +3,7 @@
     python tools/soccernet_eval.py path/to/SNMOT-116 [more clips] --work out_dir [--tag name]
                                    [--set reid_split=0.25 --set reid_min_cos=0.4]
 
-Each clip (SoccerNet-Tracking 2023: 30 s of broadcast video at 25 fps, 1080p, every player boxed
+Each clip (SoccerNet-Tracking 2023 or Game State Reconstruction: 30 s of broadcast video at 25 fps, 1080p, every player boxed
 with a persistent identity, his team and shirt number) is turned into a video and run through
 ``soccercal.run`` (analysis cached in ``--work``). Our person boxes are matched to the ground-truth
 boxes frame by frame (IoU >= 0.5), and:
@@ -51,7 +51,13 @@ def clip_to_video(d: Path, out: Path, fps: float = 25.0) -> Path:
     return out
 
 
-def ground_truth(d: Path):
+def ground_truth(d: Path, all_people: bool = False):
+    """Ground-truth player boxes (frame, track id, x, y, w, h) and {track id: (team side, number,
+    goalkeeper)}, from a SoccerNet-Tracking clip (gt/gt.txt + gameinfo.ini) or a SoccerNet Game
+    State Reconstruction clip (Labels-GameState.json: same boxes and identities). ``all_people``:
+    the boxes of referees and others too (``info`` still lists the players only)."""
+    if (d / "Labels-GameState.json").exists():
+        return _ground_truth_gsr(d / "Labels-GameState.json", all_people)
     ini = configparser.ConfigParser()
     ini.read(d / "gameinfo.ini")
     info = {}
@@ -62,8 +68,31 @@ def ground_truth(d: Path):
                 info[int(k.split("_")[1])] = ("left" if "left" in role else "right",
                                               int(num) if num.strip().isdigit() else None, "goalkeeper" in role)
     gt = np.loadtxt(d / "gt" / "gt.txt", delimiter=",")
-    gt = gt[np.isin(gt[:, 1].astype(int), list(info))]
+    if not all_people:
+        gt = gt[np.isin(gt[:, 1].astype(int), list(info))]
     return gt, info
+
+
+def _ground_truth_gsr(path: Path, all_people: bool = False):
+    lab = json.load(open(path))
+    frame_of = {im["image_id"]: int(Path(im["file_name"]).stem) for im in lab["images"]}
+    rows, votes = [], defaultdict(Counter)
+    for a in lab["annotations"]:
+        at = a.get("attributes") or {}
+        if "bbox_image" not in a or a.get("category_id") not in (1, 2, 3):
+            continue
+        player = a["category_id"] in (1, 2) and at.get("team") in ("left", "right")
+        if not (player or all_people):
+            continue  # players and goalkeepers only
+        b = a["bbox_image"]
+        rows.append((frame_of[a["image_id"]], a["track_id"], b["x"], b["y"], b["w"], b["h"]))
+        if player:
+            votes[a["track_id"]][(at["team"], at.get("jersey"), a["category_id"] == 2)] += 1
+    info = {}
+    for t, c in votes.items():
+        team, num, gk = c.most_common(1)[0][0]
+        info[int(t)] = (team, int(num) if num is not None and str(num).isdigit() else None, bool(gk))
+    return np.array(rows, float), info
 
 
 def iou(a, b):
